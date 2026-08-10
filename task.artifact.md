@@ -1,0 +1,22 @@
+# Tasks - Cross-Device Sync App Phase 1 Bug Fixes & API 35 Adaptation
+
+- [x] Step 1: Adapt for Android 15 (API Level 35)
+  - [x] Update `compileSdk` to 36 and `targetSdk` to 35 in `build.gradle.kts`
+  - [x] Add `enableEdgeToEdge()` in `MainActivity.kt` with `onCreate()` override
+  - [x] Add `androidx.activity:activity-ktx` dependency
+- [x] Step 2: Fix Client "Connecting" Hang
+  - [x] Add 10-second timeout to `WebSocket.connect` in `WebSocketTransport`
+  - [x] Add error state handling and "Retry" UI in `ClientHomeScreen`
+- [x] Step 3: Fix Server Stale Connection Info
+  - [x] Add `clearAllData()` to `DatabaseService`
+  - [x] Add "Clear All Data" button to `ServerHomeScreen`
+  - [x] Ensure server state resets correctly on disconnect/reopen
+- [x] Step 4: Fix Deep Source Code Bugs
+  - [x] Fix NSD discovery — add `ipLookupType: IpLookupType.any` for IP resolution with hostname fallback
+  - [x] Fix `_refreshData()` infinite recursion — replaced with `Timer.periodic` + `mounted` check
+  - [x] Fix `_handleMessage` async void → proper `Future<void>` with `.catchError()`
+  - [x] Add `dispose()` to `ClientHomeScreen` (cancel subscriptions, dispose `_pinController`)
+  - [x] Add `dispose()` to `ServerHomeScreen` (cancel timer, cancel state subscription)
+  - [x] Close `StreamController`s in `WebSocketTransport.disconnect()`
+  - [x] Remove redundant `sqfliteFfiInit()` from `DatabaseService._initDb()` (already in `main.dart`)
+  - [x] Add `dispose()` method to `NsdDiscoveryService`

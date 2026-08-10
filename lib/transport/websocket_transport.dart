@@ -22,13 +22,9 @@ class WebSocketTransport implements SyncTransport {
   Stream<int> get activeClientCount => _activeClientCountController.stream;
   int get currentClientCount => _sockets.length;
 
-  WebSocketTransport() {
-    _startPingTimer();
-  }
-
-  void _startPingTimer() {
+  void _ensurePingTimer() {
+    if (_pingTimer != null && _pingTimer!.isActive) return;
     _pingTimer?.cancel();
-    // 10s ping interval to keep sockets alive in Android background
     _pingTimer = Timer.periodic(const Duration(seconds: 10), (_) {
       final toRemove = <WebSocket>[];
       for (var socket in _sockets) {
@@ -75,6 +71,15 @@ class WebSocketTransport implements SyncTransport {
 
   @override
   Future<void> startServer(int port) async {
+    // Guard: close existing server before rebinding to prevent SocketException
+    if (_server != null) {
+      debugPrint("Server already bound on port, closing before rebind...");
+      try {
+        await _server!.close(force: true);
+      } catch (_) {}
+      _server = null;
+    }
+
     _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
     debugPrint("Server listening on 0.0.0.0:$port");
     _server?.transform(WebSocketTransformer()).listen((WebSocket socket) {
@@ -87,6 +92,7 @@ class WebSocketTransport implements SyncTransport {
     _sockets.add(socket);
     _connectionStatusController.add(true);
     _activeClientCountController.add(_sockets.length);
+    _ensurePingTimer(); // Restart ping timer if it was cancelled by disconnect
     _listenToSocket(socket);
   }
 
@@ -106,7 +112,6 @@ class WebSocketTransport implements SyncTransport {
       (data) {
         if (data is String) {
           if (data.contains('"ping"')) {
-            // Heartbeat ping message, ignore
             return;
           }
           try {
@@ -148,6 +153,7 @@ class WebSocketTransport implements SyncTransport {
   @override
   Future<void> disconnect() async {
     _pingTimer?.cancel();
+    _pingTimer = null;
     for (var socket in List.from(_sockets)) {
       try {
         await socket.close();

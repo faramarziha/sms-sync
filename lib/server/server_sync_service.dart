@@ -30,6 +30,9 @@ class ServerSyncService {
   final DatabaseService db = DatabaseService();
   final FileTransferService fileTransfer = FileTransferService();
 
+  /// Set of device IDs that have successfully verified the PIN for this session
+  final Set<String> _pairedDeviceIds = {};
+
   ServerState _state = ServerState.idle;
   ServerState get state => _state;
 
@@ -118,6 +121,7 @@ class ServerSyncService {
         }
 
         if (pairing.verifyPin(pin)) {
+          _pairedDeviceIds.add(devId);
           _connectedDevices[devId] = ConnectedDeviceInfo(
             deviceId: devId,
             deviceName: devName,
@@ -138,37 +142,47 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.contactInfo:
-        if (pairing.isPaired) {
+        if (_pairedDeviceIds.contains(devId)) {
           await db.insertOrUpdateSim(message.payload);
           _dataUpdatedController.add(null);
+        } else {
+          debugPrint("Rejected contactInfo payload from unpaired device: $devId");
         }
         break;
 
       case SyncMessageType.sms:
-        if (pairing.isPaired) {
+        if (_pairedDeviceIds.contains(devId)) {
           await db.insertOrUpdateSms(message.payload);
           _dataUpdatedController.add(null);
+        } else {
+          debugPrint("Rejected sms payload from unpaired device: $devId");
         }
         break;
 
       case SyncMessageType.rawText:
-        if (pairing.isPaired) {
+        if (_pairedDeviceIds.contains(devId)) {
           await db.insertRawText(message.payload);
           _dataUpdatedController.add(null);
+        } else {
+          debugPrint("Rejected rawText payload from unpaired device: $devId");
         }
         break;
 
       case SyncMessageType.fileHeader:
-        if (pairing.isPaired) {
+        if (_pairedDeviceIds.contains(devId)) {
           await fileTransfer.handleFileHeader(message.payload);
           _dataUpdatedController.add(null);
+        } else {
+          debugPrint("Rejected fileHeader payload from unpaired device: $devId");
         }
         break;
 
       case SyncMessageType.fileChunk:
-        if (pairing.isPaired) {
+        if (_pairedDeviceIds.contains(devId)) {
           await fileTransfer.handleFileChunk(message.payload);
           _dataUpdatedController.add(null);
+        } else {
+          debugPrint("Rejected fileChunk payload from unpaired device: $devId");
         }
         break;
 
@@ -210,6 +224,7 @@ class ServerSyncService {
     for (var devId in _connectedDevices.keys) {
       db.deleteDataForDevice(devId);
     }
+    _pairedDeviceIds.clear();
     _connectedDevices.clear();
     _dataUpdatedController.add(null);
   }

@@ -1,13 +1,97 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../../core/file_launcher.dart';
 import '../../core/models/sync_message.dart';
 import '../../core/file_transfer_service.dart';
 import '../client_sync_service.dart';
 import '../../transport/sync_transport.dart';
+
+// ──────────────────────────────────────────
+// Radar Sweep Painter
+// ──────────────────────────────────────────
+class _RadarPainter extends CustomPainter {
+  final double sweepAngle;
+  final Color color;
+  final int dotCount;
+
+  _RadarPainter({required this.sweepAngle, required this.color, this.dotCount = 0});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = min(size.width, size.height) / 2 - 8;
+
+    // Concentric rings
+    for (int i = 1; i <= 3; i++) {
+      final r = radius * i / 3;
+      canvas.drawCircle(
+        center,
+        r,
+        Paint()
+          ..color = color.withValues(alpha: 0.08)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
+
+    // Cross lines
+    canvas.drawLine(
+      Offset(center.dx - radius, center.dy),
+      Offset(center.dx + radius, center.dy),
+      Paint()..color = color.withValues(alpha: 0.06)..strokeWidth = 1,
+    );
+    canvas.drawLine(
+      Offset(center.dx, center.dy - radius),
+      Offset(center.dx, center.dy + radius),
+      Paint()..color = color.withValues(alpha: 0.06)..strokeWidth = 1,
+    );
+
+    // Sweep gradient
+    final sweepPaint = Paint()
+      ..shader = SweepGradient(
+        startAngle: sweepAngle - 0.6,
+        endAngle: sweepAngle,
+        colors: [
+          color.withValues(alpha: 0.0),
+          color.withValues(alpha: 0.3),
+        ],
+        tileMode: TileMode.clamp,
+      ).createShader(Rect.fromCircle(center: center, radius: radius))
+      ..style = PaintingStyle.fill;
+
+    canvas.drawCircle(center, radius, sweepPaint);
+
+    // Center dot
+    canvas.drawCircle(center, 4, Paint()..color = color);
+    canvas.drawCircle(
+      center,
+      8,
+      Paint()..color = color.withValues(alpha: 0.2),
+    );
+
+    // Random dots for discovered devices
+    final rng = Random(42);
+    for (int i = 0; i < dotCount; i++) {
+      final angle = rng.nextDouble() * 2 * pi;
+      final dist = radius * 0.3 + rng.nextDouble() * radius * 0.5;
+      final dotCenter = Offset(
+        center.dx + cos(angle) * dist,
+        center.dy + sin(angle) * dist,
+      );
+      canvas.drawCircle(dotCenter, 4, Paint()..color = const Color(0xFF7EE787));
+      canvas.drawCircle(dotCenter, 8, Paint()..color = const Color(0xFF7EE787).withValues(alpha: 0.2));
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _RadarPainter old) =>
+      old.sweepAngle != sweepAngle || old.dotCount != dotCount;
+}
 
 class ClientHomeScreen extends StatefulWidget {
   final ClientSyncService service;
@@ -33,32 +117,35 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
   final List<Map<String, dynamic>> _textHistory = [];
 
   TabController? _tabController;
-  AnimationController? _pulseController;
-  Animation<double>? _pulseAnimation;
+  late AnimationController _radarController;
+  late AnimationController _fadeController;
+  late Animation<double> _fadeAnimation;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
 
-    _pulseController = AnimationController(
+    _radarController = AnimationController(
       vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
+      duration: const Duration(seconds: 3),
+    )..repeat();
 
-    _pulseAnimation = Tween<double>(begin: 0.85, end: 1.15).animate(
-      CurvedAnimation(parent: _pulseController!, curve: Curves.easeInOut),
+    _fadeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 500),
     );
+    _fadeAnimation = CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
+    _fadeController.forward();
 
     _discoverySubscription = widget.service.discovery.discoveredServers.listen((servers) {
       if (mounted) {
-        setState(() {
-          _servers = servers;
-        });
+        setState(() => _servers = servers);
       }
     });
 
     _stateSubscription = widget.service.stateStream.listen((state) {
+      if (mounted) setState(() {});
       if (state == ClientState.pairing && !_isPairingDialogShowing) {
         _showPairingDialog();
       }
@@ -66,9 +153,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
 
     _textSubscription = widget.service.textMessagesStream.listen((data) {
       if (mounted) {
-        setState(() {
-          _textHistory.insert(0, data);
-        });
+        setState(() => _textHistory.insert(0, data));
       }
     });
 
@@ -85,7 +170,8 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     _portController.dispose();
     _textInputController.dispose();
     _tabController?.dispose();
-    _pulseController?.dispose();
+    _radarController.dispose();
+    _fadeController.dispose();
     super.dispose();
   }
 
@@ -94,174 +180,290 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     _isPairingDialogShowing = true;
     _pinController.clear();
 
-    showDialog(
+    showModalBottomSheet(
       context: context,
-      barrierDismissible: false,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) {
-          return AlertDialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            title: const Row(
-              children: [
-                Icon(Icons.phonelink_setup, color: Colors.blue),
-                SizedBox(width: 8),
-                Text('Pairing & Sync Scope'),
-              ],
+        builder: (context, setSheetState) {
+          return Container(
+            padding: EdgeInsets.only(
+              bottom: MediaQuery.of(context).viewInsets.bottom,
             ),
-            content: SingleChildScrollView(
+            decoration: const BoxDecoration(
+              color: Color(0xFF161B22),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text('Enter 4-digit PIN from Windows Server:', style: TextStyle(fontSize: 13, color: Colors.grey)),
-                  const SizedBox(height: 8),
+                  // Handle
+                  Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 20),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  // Gradient header icon
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF58A6FF), Color(0xFFD2A8FF)],
+                      ),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Icon(Icons.phonelink_setup_rounded, color: Colors.white, size: 32),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'Pair & Sync',
+                    style: GoogleFonts.inter(fontSize: 22, fontWeight: FontWeight.w700, color: Colors.white),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Enter the 4-digit PIN from Windows',
+                    style: GoogleFonts.inter(fontSize: 13, color: Colors.white38),
+                  ),
+                  const SizedBox(height: 20),
+                  // PIN Input
                   TextField(
                     controller: _pinController,
                     keyboardType: TextInputType.number,
                     maxLength: 4,
                     autofocus: true,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold, letterSpacing: 6),
-                    decoration: const InputDecoration(
-                      hintText: 'PIN',
-                      border: OutlineInputBorder(),
+                    style: GoogleFonts.jetBrainsMono(
+                      fontSize: 32,
+                      fontWeight: FontWeight.w700,
+                      color: const Color(0xFFF0883E),
+                      letterSpacing: 12,
+                    ),
+                    decoration: InputDecoration(
+                      counterText: '',
+                      hintText: '• • • •',
+                      hintStyle: GoogleFonts.inter(
+                        fontSize: 28,
+                        color: Colors.white.withValues(alpha: 0.15),
+                        letterSpacing: 12,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  const Text('Choose Connection Purpose:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14)),
-                  const SizedBox(height: 8),
-                  _buildScopeTile(
+                  const SizedBox(height: 20),
+                  // Scope selector
+                  Text(
+                    'Sync Mode',
+                    style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white60),
+                  ),
+                  const SizedBox(height: 10),
+                  _buildScopeOption(
                     scope: SyncScope.textFiles,
-                    title: 'فایل و متن (Text & Files)',
-                    subtitle: 'Quick text copy/paste & file transfer',
-                    icon: Icons.file_present,
-                    color: Colors.purple,
+                    title: 'Text & Files',
+                    icon: Icons.file_present_rounded,
+                    color: const Color(0xFFD2A8FF),
                     selectedScope: _selectedScope,
-                    onSelect: (s) => setDialogState(() => _selectedScope = s),
+                    onSelect: (s) => setSheetState(() => _selectedScope = s),
                   ),
-                  _buildScopeTile(
+                  _buildScopeOption(
                     scope: SyncScope.smsSim,
-                    title: 'پیامک و شماره تلفن (SMS & SIM)',
-                    subtitle: 'Sync SMS messages and SIM card numbers',
-                    icon: Icons.sms,
-                    color: Colors.blue,
+                    title: 'SMS & SIM Cards',
+                    icon: Icons.sms_rounded,
+                    color: const Color(0xFF58A6FF),
                     selectedScope: _selectedScope,
-                    onSelect: (s) => setDialogState(() => _selectedScope = s),
+                    onSelect: (s) => setSheetState(() => _selectedScope = s),
                   ),
-                  _buildScopeTile(
+                  _buildScopeOption(
                     scope: SyncScope.both,
-                    title: 'هر دو (Full Sync)',
-                    subtitle: 'All features: Text, Files, SMS & SIM cards',
-                    icon: Icons.bolt,
-                    color: Colors.green,
+                    title: 'Full Sync (All)',
+                    icon: Icons.bolt_rounded,
+                    color: const Color(0xFF7EE787),
                     selectedScope: _selectedScope,
-                    onSelect: (s) => setDialogState(() => _selectedScope = s),
+                    onSelect: (s) => setSheetState(() => _selectedScope = s),
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () {
+                            _isPairingDialogShowing = false;
+                            Navigator.pop(context);
+                            widget.service.startDiscovery();
+                          },
+                          child: const Text('Cancel'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        flex: 2,
+                        child: ElevatedButton.icon(
+                          icon: const Icon(Icons.check_rounded, size: 20),
+                          label: const Text('Connect'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1F6FEB),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                          ),
+                          onPressed: () {
+                            _isPairingDialogShowing = false;
+                            widget.service.sendPairRequest(_pinController.text, scope: _selectedScope);
+                            Navigator.pop(context);
+                          },
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
             ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  _isPairingDialogShowing = false;
-                  Navigator.pop(context);
-                  widget.service.startDiscovery();
-                },
-                child: const Text('Cancel'),
-              ),
-              ElevatedButton.icon(
-                icon: const Icon(Icons.check),
-                label: const Text('Pair Now'),
-                onPressed: () {
-                  _isPairingDialogShowing = false;
-                  widget.service.sendPairRequest(_pinController.text, scope: _selectedScope);
-                  Navigator.pop(context);
-                },
-              ),
-            ],
           );
         },
       ),
-    ).then((_) {
-      _isPairingDialogShowing = false;
-    });
+    ).then((_) => _isPairingDialogShowing = false);
   }
 
-  Widget _buildScopeTile({
+  Widget _buildScopeOption({
     required SyncScope scope,
     required String title,
-    required String subtitle,
     required IconData icon,
     required Color color,
     required SyncScope selectedScope,
     required ValueChanged<SyncScope> onSelect,
   }) {
     final isSelected = selectedScope == scope;
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      decoration: BoxDecoration(
-        color: isSelected ? color.withValues(alpha: 0.1) : Colors.grey[100],
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: isSelected ? color : Colors.transparent,
-          width: 2,
+    return GestureDetector(
+      onTap: () => onSelect(scope),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        margin: const EdgeInsets.symmetric(vertical: 3),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        decoration: BoxDecoration(
+          color: isSelected ? color.withValues(alpha: 0.1) : Colors.white.withValues(alpha: 0.03),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isSelected ? color.withValues(alpha: 0.5) : Colors.white.withValues(alpha: 0.06),
+            width: isSelected ? 1.5 : 1,
+          ),
         ),
-      ),
-      child: ListTile(
-        dense: true,
-        leading: Icon(icon, color: color),
-        title: Text(title, style: TextStyle(fontWeight: FontWeight.bold, color: isSelected ? color : Colors.black87)),
-        subtitle: Text(subtitle, style: const TextStyle(fontSize: 11)),
-        trailing: isSelected ? Icon(Icons.check_circle, color: color) : null,
-        onTap: () => onSelect(scope),
+        child: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: isSelected ? 0.2 : 0.08),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Icon(icon, color: color, size: 20),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Text(
+                title,
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                  color: isSelected ? color : Colors.white54,
+                ),
+              ),
+            ),
+            if (isSelected)
+              Icon(Icons.check_circle_rounded, color: color, size: 22),
+          ],
+        ),
       ),
     );
   }
 
   void _showManualConnectDialog() {
-    showDialog(
+    showModalBottomSheet(
       context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Connect via IP Address'),
-        content: Column(
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => Container(
+        padding: EdgeInsets.only(
+          bottom: MediaQuery.of(context).viewInsets.bottom + 24,
+          left: 24,
+          right: 24,
+          top: 12,
+        ),
+        decoration: const BoxDecoration(
+          color: Color(0xFF161B22),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 20),
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Text('Manual Connect', style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white)),
+            const SizedBox(height: 16),
             TextField(
               controller: _ipController,
               keyboardType: TextInputType.url,
+              style: GoogleFonts.jetBrainsMono(color: Colors.white, fontSize: 16),
               decoration: const InputDecoration(
                 labelText: 'Server IP Address',
-                hintText: 'e.g. 192.168.1.100',
+                hintText: '192.168.1.100',
+                prefixIcon: Icon(Icons.language_rounded),
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 12),
             TextField(
               controller: _portController,
               keyboardType: TextInputType.number,
+              style: GoogleFonts.jetBrainsMono(color: Colors.white, fontSize: 16),
               decoration: const InputDecoration(
                 labelText: 'Port',
                 hintText: '8080',
+                prefixIcon: Icon(Icons.numbers_rounded),
               ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  flex: 2,
+                  child: ElevatedButton.icon(
+                    icon: const Icon(Icons.link_rounded),
+                    label: const Text('Connect'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF1F6FEB),
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                    ),
+                    onPressed: () {
+                      Navigator.pop(context);
+                      final ip = _ipController.text.trim();
+                      final port = int.tryParse(_portController.text.trim()) ?? 8080;
+                      if (ip.isNotEmpty) {
+                        widget.service.connectToServer(
+                          DiscoveredServer(name: 'Manual', address: ip, port: port),
+                        );
+                      }
+                    },
+                  ),
+                ),
+              ],
             ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              final ip = _ipController.text.trim();
-              final port = int.tryParse(_portController.text.trim()) ?? 8080;
-              if (ip.isNotEmpty) {
-                widget.service.connectToServer(
-                  DiscoveredServer(name: 'Manual Server', address: ip, port: port),
-                );
-              }
-            },
-            child: const Text('Connect'),
-          ),
-        ],
       ),
     );
   }
@@ -274,63 +476,150 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     }
   }
 
+  Widget _miniChip(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Text(text, style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
+    );
+  }
+
+  // ──────────────────────────────────────────
+  // SMS Synced Tab
+  // ──────────────────────────────────────────
+  Widget _buildSmsTab() {
+    return Center(
+      child: FadeTransition(
+        opacity: _fadeAnimation,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF238636), Color(0xFF7EE787)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                boxShadow: [
+                  BoxShadow(color: const Color(0xFF7EE787).withValues(alpha: 0.2), blurRadius: 30, spreadRadius: 5),
+                ],
+              ),
+              child: const Icon(Icons.check_rounded, size: 48, color: Colors.white),
+            ),
+            const SizedBox(height: 24),
+            Text(
+              'SMS & SIM Auto-Sync Active',
+              style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Messages and SIM cards are syncing to your PC',
+              style: GoogleFonts.inter(color: Colors.white38, fontSize: 14),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              decoration: BoxDecoration(
+                color: const Color(0xFF7EE787).withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: const Color(0xFF7EE787).withValues(alpha: 0.2)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 6,
+                    height: 6,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Color(0xFF7EE787),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'Background Sync Active',
+                    style: GoogleFonts.inter(color: const Color(0xFF7EE787), fontWeight: FontWeight.w600, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ──────────────────────────────────────────
+  // Text Tab
+  // ──────────────────────────────────────────
   Widget _buildTextTab() {
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.all(12.0),
-          child: Column(
-            children: [
-              TextField(
-                controller: _textInputController,
-                maxLines: 4,
-                decoration: InputDecoration(
-                  hintText: 'Type or paste formatted text here...',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                  filled: true,
-                  fillColor: Colors.grey[50],
-                  suffixIcon: IconButton(
-                    icon: const Icon(Icons.paste, color: Colors.blue),
-                    tooltip: 'Paste from Clipboard',
-                    onPressed: () async {
-                      final data = await Clipboard.getData(Clipboard.kTextPlain);
-                      if (data?.text != null) {
-                        _textInputController.text = data!.text!;
-                      }
-                    },
+          padding: const EdgeInsets.all(14.0),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFF161B22),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+            ),
+            child: Column(
+              children: [
+                TextField(
+                  controller: _textInputController,
+                  maxLines: 3,
+                  style: GoogleFonts.inter(color: Colors.white, fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: 'Type or paste text...',
+                    suffixIcon: IconButton(
+                      icon: Icon(Icons.paste_rounded, color: Colors.white.withValues(alpha: 0.4)),
+                      onPressed: () async {
+                        final data = await Clipboard.getData(Clipboard.kTextPlain);
+                        if (data?.text != null) {
+                          _textInputController.text = data!.text!;
+                        }
+                      },
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 8),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  OutlinedButton.icon(
-                    onPressed: () => _textInputController.clear(),
-                    icon: const Icon(Icons.clear_all),
-                    label: const Text('Clear'),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton.icon(
-                    icon: const Icon(Icons.send),
-                    label: const Text('Send Text'),
-                    onPressed: () {
-                      if (_textInputController.text.isNotEmpty) {
-                        widget.service.sendRawText(_textInputController.text);
-                        _textInputController.clear();
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ],
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    OutlinedButton(
+                      onPressed: () => _textInputController.clear(),
+                      child: const Text('Clear'),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.send_rounded, size: 18),
+                      label: const Text('Send'),
+                      onPressed: () {
+                        if (_textInputController.text.isNotEmpty) {
+                          widget.service.sendRawText(_textInputController.text);
+                          _textInputController.clear();
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
-        const Divider(height: 1),
         Expanded(
           child: _textHistory.isEmpty
-              ? const Center(
-                  child: Text('No text sent or received yet', style: TextStyle(color: Colors.grey)),
+              ? Center(
+                  child: Text('No text exchanged yet', style: GoogleFonts.inter(color: Colors.white30)),
                 )
               : ListView.builder(
                   itemCount: _textHistory.length,
@@ -340,22 +629,50 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                     final sender = item['sender'] ?? 'Remote';
                     final date = DateTime.fromMillisecondsSinceEpoch(item['timestamp'] ?? 0);
 
-                    return Card(
-                      elevation: 2,
-                      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      child: ListTile(
-                        title: Text(text, maxLines: 5, overflow: TextOverflow.ellipsis),
-                        subtitle: Text('$sender • ${date.hour}:${date.minute.toString().padLeft(2, '0')}'),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.copy, color: Colors.blue),
-                          tooltip: 'Copy Text',
-                          onPressed: () {
-                            Clipboard.setData(ClipboardData(text: text));
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(content: Text('Text copied to clipboard!'), duration: Duration(seconds: 1)),
-                            );
-                          },
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+                      child: Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF161B22),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              text,
+                              maxLines: 5,
+                              overflow: TextOverflow.ellipsis,
+                              style: GoogleFonts.inter(fontSize: 13, color: Colors.white70, height: 1.5),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                _miniChip(sender, const Color(0xFFD2A8FF)),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '${date.hour}:${date.minute.toString().padLeft(2, '0')}',
+                                  style: GoogleFonts.inter(fontSize: 11, color: Colors.white30),
+                                ),
+                                const Spacer(),
+                                IconButton(
+                                  icon: Icon(Icons.copy_rounded, size: 16, color: Colors.white.withValues(alpha: 0.3)),
+                                  visualDensity: VisualDensity.compact,
+                                  onPressed: () {
+                                    Clipboard.setData(ClipboardData(text: text));
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('Copied!', style: GoogleFonts.inter(fontSize: 13)),
+                                        duration: const Duration(seconds: 1),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
                       ),
                     );
@@ -366,22 +683,27 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     );
   }
 
+  // ──────────────────────────────────────────
+  // File Tab
+  // ──────────────────────────────────────────
   Widget _buildFileTab() {
     return Column(
       children: [
         Padding(
           padding: const EdgeInsets.all(16.0),
-          child: ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 24),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                backgroundColor: const Color(0xFF1F6FEB),
+              ),
+              icon: const Icon(Icons.upload_file_rounded, size: 22),
+              label: Text('Send File', style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 15)),
+              onPressed: _pickAndSendFile,
             ),
-            icon: const Icon(Icons.upload_file, size: 24),
-            label: const Text('Select File to Send', style: TextStyle(fontSize: 16)),
-            onPressed: _pickAndSendFile,
           ),
         ),
-        const Divider(height: 1),
         Expanded(
           child: StreamBuilder<List<FileTransferItem>>(
             stream: widget.service.fileTransfer.transfersStream,
@@ -389,13 +711,21 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
             builder: (context, snapshot) {
               final transfers = snapshot.data ?? [];
               if (transfers.isEmpty) {
-                return const Center(
+                return Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.folder_open, size: 64, color: Colors.grey),
-                      SizedBox(height: 12),
-                      Text('No file transfers yet', style: TextStyle(color: Colors.grey)),
+                      Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Colors.white.withValues(alpha: 0.03),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+                        ),
+                        child: Icon(Icons.folder_open_rounded, size: 40, color: Colors.white.withValues(alpha: 0.15)),
+                      ),
+                      const SizedBox(height: 14),
+                      Text('No file transfers', style: GoogleFonts.inter(color: Colors.white30, fontSize: 14)),
                     ],
                   ),
                 );
@@ -407,59 +737,72 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                   final item = transfers[index];
                   final sizeMb = (item.fileSize / (1024 * 1024)).toStringAsFixed(2);
                   final pct = (item.progress * 100).toInt();
+                  final isUp = item.isOutgoing;
 
-                  return Card(
-                    elevation: 2,
-                    margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF161B22),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              Icon(
-                                item.isOutgoing ? Icons.upload : Icons.download,
-                                color: item.isOutgoing ? Colors.blue : Colors.green,
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: (isUp ? const Color(0xFF58A6FF) : const Color(0xFF7EE787)).withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(
+                                  isUp ? Icons.upload_rounded : Icons.download_rounded,
+                                  color: isUp ? const Color(0xFF58A6FF) : const Color(0xFF7EE787),
+                                  size: 18,
+                                ),
                               ),
-                              const SizedBox(width: 10),
+                              const SizedBox(width: 12),
                               Expanded(
                                 child: Text(
                                   item.fileName,
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                                  style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 14, color: Colors.white),
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              Text('$sizeMb MB', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                              Text('$sizeMb MB', style: GoogleFonts.inter(color: Colors.white30, fontSize: 11)),
                             ],
                           ),
-                          const SizedBox(height: 8),
-                          LinearProgressIndicator(
-                            value: item.progress,
-                            backgroundColor: Colors.grey[200],
-                            color: item.isCompleted ? Colors.green : Colors.blue,
+                          const SizedBox(height: 10),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(3),
+                            child: LinearProgressIndicator(
+                              value: item.progress,
+                              color: item.isCompleted ? const Color(0xFF7EE787) : const Color(0xFF58A6FF),
+                              minHeight: 3,
+                            ),
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 6),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
                               Text(
-                                item.isCompleted
-                                    ? '✓ Complete'
-                                    : item.isFailed
-                                        ? '✗ Failed'
-                                        : '$pct%',
-                                style: TextStyle(
-                                  color: item.isCompleted ? Colors.green : (item.isFailed ? Colors.red : Colors.blue),
-                                  fontWeight: FontWeight.bold,
+                                item.isCompleted ? '✓ Complete' : item.isFailed ? '✗ Failed' : '$pct%',
+                                style: GoogleFonts.inter(
+                                  color: item.isCompleted
+                                      ? const Color(0xFF7EE787)
+                                      : (item.isFailed ? const Color(0xFFFF7B72) : const Color(0xFF58A6FF)),
+                                  fontWeight: FontWeight.w600,
                                   fontSize: 12,
                                 ),
                               ),
                               if (item.isCompleted && item.localPath != null && !item.isOutgoing)
                                 TextButton.icon(
-                                  icon: const Icon(Icons.open_in_new, size: 14),
-                                  label: const Text('Open File'),
+                                  icon: const Icon(Icons.open_in_new_rounded, size: 14),
+                                  label: Text('Open', style: GoogleFonts.inter(fontSize: 12)),
                                   onPressed: () => FileLauncher.openFile(item.localPath!),
                                 ),
                             ],
@@ -477,36 +820,229 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     );
   }
 
-  Widget _buildSmsTab() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          ScaleTransition(
-            scale: _pulseAnimation!,
-            child: const Icon(Icons.check_circle, size: 80, color: Colors.green),
-          ),
-          const SizedBox(height: 16),
-          const Text('SMS & SIM Auto-Sync Active', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-          const SizedBox(height: 8),
-          const Text('Messages and SIM card numbers are continuously synced to your PC.', style: TextStyle(color: Colors.grey), textAlign: TextAlign.center),
-          const SizedBox(height: 20),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.green[50],
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: Colors.green[200]!),
-            ),
-            child: const Row(
-              mainAxisSize: MainAxisSize.min,
+  // ──────────────────────────────────────────
+  // Scanning / Browsing View
+  // ──────────────────────────────────────────
+  Widget _buildScanningView() {
+    return Column(
+      children: [
+        Expanded(
+          child: Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(Icons.shield_outlined, color: Colors.green, size: 18),
-                SizedBox(width: 8),
-                Text('Persistent Background Sync Active', style: TextStyle(color: Colors.green, fontWeight: FontWeight.w600, fontSize: 12)),
+                SizedBox(
+                  width: 200,
+                  height: 200,
+                  child: AnimatedBuilder(
+                    animation: _radarController,
+                    builder: (context, _) {
+                      return CustomPaint(
+                        painter: _RadarPainter(
+                          sweepAngle: _radarController.value * 2 * pi,
+                          color: const Color(0xFF58A6FF),
+                          dotCount: _servers.length,
+                        ),
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  _servers.isEmpty ? 'Scanning for servers...' : '${_servers.length} server(s) found',
+                  style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white70),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Make sure the Windows app is running',
+                  style: GoogleFonts.inter(fontSize: 13, color: Colors.white30),
+                ),
               ],
             ),
           ),
+        ),
+        // Server list
+        if (_servers.isNotEmpty)
+          Container(
+            constraints: const BoxConstraints(maxHeight: 200),
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: _servers.length,
+              itemBuilder: (context, index) {
+                final server = _servers[index];
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Material(
+                    color: const Color(0xFF161B22),
+                    borderRadius: BorderRadius.circular(14),
+                    child: InkWell(
+                      borderRadius: BorderRadius.circular(14),
+                      onTap: () => widget.service.connectToServer(server),
+                      child: Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(color: const Color(0xFF58A6FF).withValues(alpha: 0.15)),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                gradient: const LinearGradient(
+                                  colors: [Color(0xFF1F6FEB), Color(0xFF58A6FF)],
+                                ),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: const Icon(Icons.desktop_windows_rounded, color: Colors.white, size: 20),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    server.name,
+                                    style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: Colors.white, fontSize: 15),
+                                  ),
+                                  Text(
+                                    '${server.address}:${server.port}',
+                                    style: GoogleFonts.jetBrainsMono(fontSize: 12, color: Colors.white38),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.all(8),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF1F6FEB).withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(10),
+                              ),
+                              child: const Icon(Icons.arrow_forward_rounded, size: 18, color: Color(0xFF58A6FF)),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        // Manual connect button
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+          child: SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.edit_rounded, size: 18),
+              label: const Text('Connect via IP'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+              ),
+              onPressed: _showManualConnectDialog,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  // ──────────────────────────────────────────
+  // Status bar
+  // ──────────────────────────────────────────
+  Widget _buildStatusBar(ClientState? state) {
+    Color accentColor;
+    String statusText;
+    IconData statusIcon;
+
+    switch (state) {
+      case ClientState.synced:
+        accentColor = const Color(0xFF7EE787);
+        statusText = 'Connected • ${widget.service.scope.name}';
+        statusIcon = Icons.link_rounded;
+        break;
+      case ClientState.syncing:
+        accentColor = const Color(0xFF58A6FF);
+        statusText = 'Syncing...';
+        statusIcon = Icons.sync_rounded;
+        break;
+      case ClientState.pairing:
+        accentColor = const Color(0xFFF0883E);
+        statusText = 'Awaiting PIN verification';
+        statusIcon = Icons.key_rounded;
+        break;
+      case ClientState.connecting:
+        accentColor = const Color(0xFF58A6FF);
+        statusText = 'Connecting...';
+        statusIcon = Icons.connect_without_contact_rounded;
+        break;
+      case ClientState.browsing:
+        accentColor = const Color(0xFF58A6FF);
+        statusText = 'Scanning network...';
+        statusIcon = Icons.wifi_find_rounded;
+        break;
+      case ClientState.error:
+        accentColor = const Color(0xFFFF7B72);
+        statusText = 'Connection Error';
+        statusIcon = Icons.error_outline_rounded;
+        break;
+      default:
+        accentColor = Colors.white38;
+        statusText = 'Idle';
+        statusIcon = Icons.power_settings_new_rounded;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            accentColor.withValues(alpha: 0.1),
+            accentColor.withValues(alpha: 0.03),
+          ],
+        ),
+        border: Border(bottom: BorderSide(color: accentColor.withValues(alpha: 0.2))),
+      ),
+      child: Row(
+        children: [
+          AnimatedBuilder(
+            animation: _radarController,
+            builder: (context, _) {
+              final pulse = 0.5 + 0.5 * sin(_radarController.value * 2 * pi);
+              return Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accentColor,
+                  boxShadow: [
+                    BoxShadow(color: accentColor.withValues(alpha: pulse * 0.6), blurRadius: 8, spreadRadius: 2),
+                  ],
+                ),
+              );
+            },
+          ),
+          const SizedBox(width: 10),
+          Icon(statusIcon, color: accentColor, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              statusText,
+              style: GoogleFonts.inter(color: Colors.white70, fontWeight: FontWeight.w600, fontSize: 13),
+            ),
+          ),
+          if (state == ClientState.syncing || state == ClientState.synced || state == ClientState.pairing)
+            OutlinedButton.icon(
+              onPressed: () => widget.service.disconnect(),
+              icon: const Icon(Icons.link_off_rounded, size: 14, color: Color(0xFFFF7B72)),
+              label: Text('Disconnect', style: GoogleFonts.inter(color: const Color(0xFFFF7B72), fontSize: 11)),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: Color(0xFFFF7B72)),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                visualDensity: VisualDensity.compact,
+              ),
+            ),
         ],
       ),
     );
@@ -514,28 +1050,46 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
 
   @override
   Widget build(BuildContext context) {
+    final state = widget.service.state;
+    final isSynced = state == ClientState.synced;
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('SMS Sync Client'),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF58A6FF), Color(0xFF7EE787)],
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.sync_rounded, size: 16, color: Colors.white),
+            ),
+            const SizedBox(width: 10),
+            Text('SMS Sync', style: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 18)),
+          ],
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Rescan Servers',
+            icon: Icon(Icons.refresh_rounded, color: Colors.white.withValues(alpha: 0.5), size: 22),
+            tooltip: 'Rescan',
             onPressed: () => widget.service.startDiscovery(),
           ),
           IconButton(
-            icon: const Icon(Icons.add_link),
-            tooltip: 'Manual IP Connect',
+            icon: Icon(Icons.add_link_rounded, color: Colors.white.withValues(alpha: 0.5), size: 22),
+            tooltip: 'Manual IP',
             onPressed: _showManualConnectDialog,
           ),
         ],
-        bottom: widget.service.state == ClientState.synced
+        bottom: isSynced
             ? TabBar(
                 controller: _tabController,
                 tabs: const [
-                  Tab(icon: Icon(Icons.sms), text: 'SMS & SIM'),
-                  Tab(icon: Icon(Icons.short_text), text: 'Text Share'),
-                  Tab(icon: Icon(Icons.folder), text: 'File Share'),
+                  Tab(icon: Icon(Icons.sms_rounded, size: 18), text: 'SMS'),
+                  Tab(icon: Icon(Icons.text_snippet_rounded, size: 18), text: 'Text'),
+                  Tab(icon: Icon(Icons.folder_rounded, size: 18), text: 'Files'),
                 ],
               )
             : null,
@@ -544,44 +1098,13 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
         stream: widget.service.stateStream,
         initialData: widget.service.state,
         builder: (context, snapshot) {
-          final state = snapshot.data;
+          final currentState = snapshot.data;
 
           return Column(
             children: [
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-                color: _getStatusColor(state),
-                child: Row(
-                  children: [
-                    ScaleTransition(
-                      scale: _pulseAnimation!,
-                      child: const Icon(Icons.sync, color: Colors.white, size: 18),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _getStatusText(state),
-                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                    if (state == ClientState.syncing || state == ClientState.synced || state == ClientState.pairing)
-                      ElevatedButton.icon(
-                        onPressed: () => widget.service.disconnect(),
-                        icon: const Icon(Icons.link_off, size: 16),
-                        label: const Text('Disconnect'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.white,
-                          foregroundColor: Colors.red,
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          textStyle: const TextStyle(fontSize: 12),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
+              _buildStatusBar(currentState),
 
-              if (state == ClientState.synced)
+              if (currentState == ClientState.synced)
                 Expanded(
                   child: TabBarView(
                     controller: _tabController,
@@ -593,105 +1116,101 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                   ),
                 ),
 
-              if (state == ClientState.connecting)
+              if (currentState == ClientState.connecting)
                 Expanded(
                   child: Center(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const CircularProgressIndicator(),
+                        const SizedBox(
+                          width: 48,
+                          height: 48,
+                          child: CircularProgressIndicator(
+                            color: Color(0xFF58A6FF),
+                            strokeWidth: 3,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        Text('Connecting...', style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white70)),
                         const SizedBox(height: 20),
-                        const Text('Connecting to Server...', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500)),
-                        const SizedBox(height: 20),
-                        OutlinedButton(onPressed: () => widget.service.startDiscovery(), child: const Text('Cancel')),
+                        OutlinedButton(
+                          onPressed: () => widget.service.startDiscovery(),
+                          child: const Text('Cancel'),
+                        ),
                       ],
                     ),
                   ),
                 ),
 
-              if (state == ClientState.browsing || state == ClientState.idle)
-                Expanded(
-                  child: _servers.isEmpty
-                      ? Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              ScaleTransition(
-                                scale: _pulseAnimation!,
-                                child: const Icon(Icons.wifi_find, size: 64, color: Colors.blue),
-                              ),
-                              const SizedBox(height: 16),
-                              const Text('Searching for Windows Server on Wi-Fi...'),
-                              const SizedBox(height: 16),
-                              ElevatedButton.icon(
-                                onPressed: _showManualConnectDialog,
-                                icon: const Icon(Icons.edit),
-                                label: const Text('Connect via IP Manually'),
-                              ),
-                            ],
-                          ),
-                        )
-                      : ListView.builder(
-                          itemCount: _servers.length,
-                          itemBuilder: (context, index) {
-                            final server = _servers[index];
-                            return Card(
-                              margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                              elevation: 3,
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                              child: ListTile(
-                                leading: const Icon(Icons.desktop_windows, color: Colors.blue),
-                                title: Text(server.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                                subtitle: Text('${server.address}:${server.port}'),
-                                trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-                                onTap: () => widget.service.connectToServer(server),
-                              ),
-                            );
-                          },
-                        ),
-                ),
+              if (currentState == ClientState.browsing || currentState == ClientState.idle)
+                Expanded(child: _buildScanningView()),
 
-              if (state == ClientState.pairing)
+              if (currentState == ClientState.pairing)
                 Expanded(
                   child: Center(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        const Icon(Icons.lock, size: 64, color: Colors.orange),
-                        const SizedBox(height: 16),
-                        const Text('Connected — Enter PIN to pair'),
-                        const SizedBox(height: 16),
-                        ElevatedButton(
+                        Container(
+                          padding: const EdgeInsets.all(20),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: const LinearGradient(colors: [Color(0xFFF0883E), Color(0xFFD29922)]),
+                          ),
+                          child: const Icon(Icons.key_rounded, size: 40, color: Colors.white),
+                        ),
+                        const SizedBox(height: 20),
+                        Text('Connected', style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white)),
+                        const SizedBox(height: 6),
+                        Text('Enter PIN to pair', style: GoogleFonts.inter(fontSize: 14, color: Colors.white38)),
+                        const SizedBox(height: 20),
+                        ElevatedButton.icon(
+                          icon: const Icon(Icons.lock_open_rounded),
+                          label: const Text('Enter PIN'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1F6FEB),
+                            padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 14),
+                          ),
                           onPressed: _showPairingDialog,
-                          child: const Text('Choose Scope & Enter PIN'),
                         ),
                       ],
                     ),
                   ),
                 ),
 
-              if (state == ClientState.error)
+              if (currentState == ClientState.error)
                 Expanded(
                   child: Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(24.0),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.error_outline, color: Colors.red, size: 64),
-                          const SizedBox(height: 16),
-                          const Text('Connection Failed', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 24),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              ElevatedButton(onPressed: () => widget.service.startDiscovery(), child: const Text('Retry Scan')),
-                              const SizedBox(width: 12),
-                              OutlinedButton(onPressed: _showManualConnectDialog, child: const Text('Manual IP')),
-                            ],
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(20),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: const Color(0xFFFF7B72).withValues(alpha: 0.1),
+                            border: Border.all(color: const Color(0xFFFF7B72).withValues(alpha: 0.3)),
                           ),
-                        ],
-                      ),
+                          child: const Icon(Icons.error_outline_rounded, color: Color(0xFFFF7B72), size: 40),
+                        ),
+                        const SizedBox(height: 20),
+                        Text('Connection Failed', style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700, color: Colors.white)),
+                        const SizedBox(height: 20),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            ElevatedButton(
+                              onPressed: () => widget.service.startDiscovery(),
+                              child: const Text('Retry Scan'),
+                            ),
+                            const SizedBox(width: 12),
+                            OutlinedButton(
+                              onPressed: _showManualConnectDialog,
+                              child: const Text('Manual IP'),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
@@ -700,41 +1219,5 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
         },
       ),
     );
-  }
-
-  Color _getStatusColor(ClientState? state) {
-    switch (state) {
-      case ClientState.synced:
-        return Colors.green[700]!;
-      case ClientState.syncing:
-        return Colors.blue[700]!;
-      case ClientState.pairing:
-        return Colors.orange[800]!;
-      case ClientState.connecting:
-        return Colors.blue[700]!;
-      case ClientState.error:
-        return Colors.red[700]!;
-      default:
-        return Colors.grey[700]!;
-    }
-  }
-
-  String _getStatusText(ClientState? state) {
-    switch (state) {
-      case ClientState.synced:
-        return '✓ Connected & Background Sync Active (${widget.service.scope.name})';
-      case ClientState.syncing:
-        return '↑ Initializing connection...';
-      case ClientState.pairing:
-        return '🔐 Waiting for PIN verification';
-      case ClientState.connecting:
-        return '⏳ Connecting...';
-      case ClientState.browsing:
-        return '📡 Scanning for servers...';
-      case ClientState.error:
-        return '✗ Connection Error';
-      default:
-        return 'Idle';
-    }
   }
 }

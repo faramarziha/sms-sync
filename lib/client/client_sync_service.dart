@@ -1,7 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
-import 'package:uuid/uuid.dart';
+import 'package:crypto/crypto.dart';
+import 'dart:convert';
 import '../core/models/sync_message.dart';
 import '../core/file_transfer_service.dart';
 import '../transport/sync_transport.dart';
@@ -17,8 +18,9 @@ class ClientSyncService {
   final AndroidNativeBridge nativeBridge = AndroidNativeBridge();
   final FileTransferService fileTransfer = FileTransferService();
 
-  final String deviceId = const Uuid().v4().substring(0, 8);
-  final String deviceName = Platform.isAndroid ? 'Android Phone ($Platform.operatingSystem)' : 'Mobile Client';
+  /// Stable device ID derived from platform hash — survives app restarts
+  late final String deviceId;
+  late final String deviceName;
 
   ClientState _state = ClientState.idle;
   ClientState get state => _state;
@@ -35,9 +37,21 @@ class ClientSyncService {
   Stream<Map<String, dynamic>> get textMessagesStream => _textMessagesController.stream;
 
   ClientSyncService(this.transport, this.discovery) {
-    transport.messages.listen(_handleMessage);
+    // Generate stable device ID from platform info
+    final platformInfo = '${Platform.operatingSystem}_${Platform.operatingSystemVersion}_${Platform.localHostname}';
+    deviceId = sha256.convert(utf8.encode(platformInfo)).toString().substring(0, 12);
+    deviceName = Platform.isAndroid
+        ? 'Android Phone (${Platform.operatingSystem})'
+        : 'Mobile Client (${Platform.operatingSystem})';
+
+    transport.messages.listen((message) {
+      _handleMessage(message).catchError((e) {
+        debugPrint('Error handling client message: $e');
+      });
+    });
+
     transport.connectionStatus.listen((connected) {
-      if (!connected) {
+      if (!connected && (_state == ClientState.synced || _state == ClientState.syncing || _state == ClientState.pairing)) {
         _stopPeriodicSync();
         _stopForegroundService();
         _updateState(ClientState.idle);
@@ -52,6 +66,11 @@ class ClientSyncService {
 
   Future<void> startDiscovery() async {
     _updateState(ClientState.browsing);
+    try {
+      await transport.startServer(8081);
+    } catch (e) {
+      debugPrint("Client socket server start notice: $e");
+    }
     if (discovery is NsdDiscoveryService) {
       await (discovery as NsdDiscoveryService).startBrowsing(type: 'mysync');
       await (discovery as NsdDiscoveryService).startAdvertising(deviceName, 8081, type: 'mysync');
@@ -66,6 +85,7 @@ class ClientSyncService {
       await transport.connect(server.address, server.port);
       _updateState(ClientState.pairing);
     } catch (e) {
+      debugPrint('Connection to server failed: $e');
       _updateState(ClientState.error);
     }
   }
@@ -83,13 +103,13 @@ class ClientSyncService {
     ));
   }
 
-  void _handleMessage(SyncMessage message) async {
+  Future<void> _handleMessage(SyncMessage message) async {
     switch (message.type) {
       case SyncMessageType.pairVerify:
         if (message.payload['status'] == 'success') {
           _updateState(ClientState.syncing);
           _startForegroundService();
-          _runSync();
+          await _runSync();
         }
         break;
       case SyncMessageType.rawText:
@@ -118,7 +138,6 @@ class ClientSyncService {
     }
   }
 
-  /// Sends formatted text to the Desktop server.
   Future<void> sendRawText(String text) async {
     if (text.trim().isEmpty) return;
     final payload = {
@@ -135,7 +154,6 @@ class ClientSyncService {
     _textMessagesController.add(payload);
   }
 
-  /// Sends a file to the Desktop server.
   Future<void> sendFile(File file) async {
     await fileTransfer.sendFile(
       file: file,
@@ -144,13 +162,12 @@ class ClientSyncService {
     );
   }
 
-  /// Runs a full sync cycle: sends SIM info + recent SMS if scope requires it.
   Future<void> _runSync() async {
     try {
       if (_scope == SyncScope.smsSim || _scope == SyncScope.both) {
         if (await Permission.sms.request().isGranted &&
             await Permission.phone.request().isGranted) {
-          
+
           final sims = await nativeBridge.getSubscriptionInfo();
           for (var sim in sims) {
             final simPayload = Map<String, dynamic>.from(sim);

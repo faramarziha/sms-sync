@@ -160,7 +160,8 @@ class FileTransferService {
   /// Handle incoming file header
   Future<void> handleFileHeader(Map<String, dynamic> payload) async {
     final fileId = payload['fileId'] as String;
-    final fileName = payload['fileName'] as String;
+    final rawFileName = payload['fileName'] as String;
+    final fileName = p.basename(rawFileName);
     final fileSize = payload['fileSize'] as int;
     final sender = payload['sender'] as String? ?? 'Remote Device';
 

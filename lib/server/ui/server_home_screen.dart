@@ -1,15 +1,49 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:google_fonts/google_fonts.dart';
 import '../../core/file_launcher.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
-import '../../core/models/sync_message.dart';
 import '../../core/file_transfer_service.dart';
 import '../../transport/sync_transport.dart';
 import '../server_sync_service.dart';
+
+// ──────────────────────────────────────────
+// Animated gradient border painter
+// ──────────────────────────────────────────
+class _GlowBorderPainter extends CustomPainter {
+  final double progress;
+  final Color color;
+
+  _GlowBorderPainter({required this.progress, required this.color});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final rect = Rect.fromLTWH(0, 0, size.width, size.height);
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(16));
+    final paint = Paint()
+      ..shader = SweepGradient(
+        startAngle: progress * 2 * pi,
+        colors: [
+          color.withValues(alpha: 0.0),
+          color.withValues(alpha: 0.6),
+          color.withValues(alpha: 0.0),
+        ],
+        stops: const [0.0, 0.5, 1.0],
+      ).createShader(rect)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawRRect(rrect, paint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _GlowBorderPainter oldDelegate) =>
+      oldDelegate.progress != progress;
+}
 
 class ServerHomeScreen extends StatefulWidget {
   final ServerSyncService service;
@@ -25,7 +59,7 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   List<Map<String, dynamic>> _rawTexts = [];
   List<DiscoveredServer> _discoveredClients = [];
 
-  String? _selectedDeviceId; // null = All Devices
+  String? _selectedDeviceId;
 
   StreamSubscription<ServerState>? _stateSubscription;
   StreamSubscription<void>? _dataSubscription;
@@ -33,22 +67,28 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
 
   final TextEditingController _textSendController = TextEditingController();
   TabController? _tabController;
-  AnimationController? _pulseController;
-  Animation<double>? _pulseAnimation;
+
+  // Animations
+  late AnimationController _glowController;
+  late AnimationController _fadeController;
+  late Animation<double> _fadeAnimation;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this);
-    
-    _pulseController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 2),
-    )..repeat(reverse: true);
 
-    _pulseAnimation = Tween<double>(begin: 0.85, end: 1.15).animate(
-      CurvedAnimation(parent: _pulseController!, curve: Curves.easeInOut),
+    _glowController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 3),
+    )..repeat();
+
+    _fadeController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
     );
+    _fadeAnimation = CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
+    _fadeController.forward();
 
     _startServer();
     _refreshData();
@@ -77,7 +117,8 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     _discoveredClientsSubscription?.cancel();
     _textSendController.dispose();
     _tabController?.dispose();
-    _pulseController?.dispose();
+    _glowController.dispose();
+    _fadeController.dispose();
     super.dispose();
   }
 
@@ -128,14 +169,12 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
       SnackBar(
         content: Row(
           children: [
-            const Icon(Icons.check_circle, color: Colors.greenAccent),
+            const Icon(Icons.check_circle_rounded, color: Color(0xFF7EE787), size: 18),
             const SizedBox(width: 10),
-            Text('$label copied to clipboard!'),
+            Text('$label copied!', style: GoogleFonts.inter(fontSize: 13)),
           ],
         ),
-        behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       ),
     );
   }
@@ -144,75 +183,108 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     final date = DateTime.fromMillisecondsSinceEpoch(msg['date'] ?? 0);
     final typeLabel = _smsTypeLabel(msg['type']);
     final deviceName = msg['device_name'] ?? 'Android Phone';
+    final isReceived = msg['type'] == 1;
 
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: Row(
-          children: [
-            Icon(
-              msg['type'] == 1 ? Icons.call_received : Icons.call_made,
-              color: msg['type'] == 1 ? Colors.blue : Colors.green,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                msg['address'] ?? 'Unknown',
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+      builder: (context) => Dialog(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 560),
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Header
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: isReceived
+                            ? [const Color(0xFF1F6FEB), const Color(0xFF58A6FF)]
+                            : [const Color(0xFF238636), const Color(0xFF7EE787)],
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      isReceived ? Icons.call_received_rounded : Icons.call_made_rounded,
+                      color: Colors.white,
+                      size: 20,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          msg['address'] ?? 'Unknown',
+                          style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700),
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            _miniChip(deviceName, const Color(0xFF58A6FF)),
+                            const SizedBox(width: 8),
+                            _miniChip(typeLabel, isReceived ? const Color(0xFF58A6FF) : const Color(0xFF7EE787)),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-            ),
-          ],
-        ),
-        content: SizedBox(
-          width: 520,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.smartphone, size: 14, color: Colors.indigo),
-                    const SizedBox(width: 4),
-                    Text(deviceName, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo, fontSize: 13)),
-                    const SizedBox(width: 12),
-                    const Icon(Icons.access_time, size: 14, color: Colors.grey),
-                    const SizedBox(width: 4),
-                    Text(
-                      '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}  '
-                      '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
-                      style: const TextStyle(color: Colors.grey, fontSize: 13),
-                    ),
-                    const SizedBox(width: 12),
-                    Chip(
-                      label: Text(typeLabel, style: const TextStyle(fontSize: 11, color: Colors.white)),
-                      backgroundColor: msg['type'] == 1 ? Colors.blue : Colors.green,
-                      visualDensity: VisualDensity.compact,
-                    ),
-                  ],
+              const SizedBox(height: 8),
+              Text(
+                '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}  '
+                '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
+                style: GoogleFonts.inter(color: Colors.white54, fontSize: 12),
+              ),
+              Divider(height: 24, color: Colors.white.withValues(alpha: 0.08)),
+              // Body
+              Container(
+                constraints: const BoxConstraints(maxHeight: 300),
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    msg['body'] ?? '',
+                    style: GoogleFonts.inter(fontSize: 14, height: 1.7, color: Colors.white70),
+                  ),
                 ),
-                const Divider(height: 20),
-                SelectableText(
-                  msg['body'] ?? '',
-                  style: const TextStyle(fontSize: 15, height: 1.5),
-                ),
-              ],
-            ),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton.icon(
+                    icon: const Icon(Icons.copy_rounded, size: 16),
+                    label: const Text('Copy'),
+                    onPressed: () => _copyToClipboard(msg['body'] ?? '', 'Message'),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Close'),
+                  ),
+                ],
+              ),
+            ],
           ),
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.copy, color: Colors.blue),
-            tooltip: 'Copy Message Body',
-            onPressed: () => _copyToClipboard(msg['body'] ?? '', 'Message'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
       ),
+    );
+  }
+
+  Widget _miniChip(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Text(text, style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
     );
   }
 
@@ -226,50 +298,46 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     }
   }
 
+  // ──────────────────────────────────────────
+  // Device Selector Bar
+  // ──────────────────────────────────────────
   Widget _buildDeviceSelectorBar() {
     final devices = widget.service.connectedDevices.values.toList();
 
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: Colors.grey[100],
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF161B22),
+        border: Border(bottom: BorderSide(color: Colors.white.withValues(alpha: 0.06))),
+      ),
       child: Row(
         children: [
-          const Icon(Icons.devices, size: 20, color: Colors.blueGrey),
-          const SizedBox(width: 8),
-          const Text('Filter Device:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
-          const SizedBox(width: 12),
+          Icon(Icons.devices_rounded, size: 18, color: Colors.white.withValues(alpha: 0.4)),
+          const SizedBox(width: 10),
           Expanded(
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
               child: Row(
                 children: [
-                  ChoiceChip(
-                    avatar: const Icon(Icons.all_inclusive, size: 16),
-                    label: Text('All Devices (${devices.length})'),
-                    selected: _selectedDeviceId == null,
-                    onSelected: (selected) {
-                      if (selected) {
-                        setState(() {
-                          _selectedDeviceId = null;
-                        });
-                        _refreshData();
-                      }
+                  _deviceChip(
+                    label: 'All (${devices.length})',
+                    isSelected: _selectedDeviceId == null,
+                    icon: Icons.all_inclusive_rounded,
+                    onTap: () {
+                      setState(() => _selectedDeviceId = null);
+                      _refreshData();
                     },
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: 6),
                   ...devices.map((device) {
-                    final isSelected = _selectedDeviceId == device.deviceId;
                     return Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: ChoiceChip(
-                        avatar: const Icon(Icons.smartphone, size: 16),
-                        label: Text(device.deviceName),
-                        selected: isSelected,
-                        selectedColor: Colors.blue[100],
-                        onSelected: (selected) {
-                          setState(() {
-                            _selectedDeviceId = selected ? device.deviceId : null;
-                          });
+                      padding: const EdgeInsets.only(right: 6),
+                      child: _deviceChip(
+                        label: device.deviceName,
+                        isSelected: _selectedDeviceId == device.deviceId,
+                        icon: Icons.smartphone_rounded,
+                        onTap: () {
+                          setState(() => _selectedDeviceId = device.deviceId);
                           _refreshData();
                         },
                       ),
@@ -284,6 +352,52 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     );
   }
 
+  Widget _deviceChip({
+    required String label,
+    required bool isSelected,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      child: Material(
+        color: isSelected ? const Color(0xFF1F6FEB).withValues(alpha: 0.2) : Colors.transparent,
+        borderRadius: BorderRadius.circular(20),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(20),
+          onTap: onTap,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: isSelected ? const Color(0xFF58A6FF) : Colors.white.withValues(alpha: 0.1),
+              ),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 14, color: isSelected ? const Color(0xFF58A6FF) : Colors.white54),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: GoogleFonts.inter(
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
+                    color: isSelected ? const Color(0xFF58A6FF) : Colors.white60,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ──────────────────────────────────────────
+  // SIM Cards Section
+  // ──────────────────────────────────────────
   Widget _buildSimCardsSection() {
     final Map<String, Map<String, dynamic>> uniqueSimsMap = {};
     for (var sim in _sims) {
@@ -295,103 +409,118 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
 
     if (displaySims.isEmpty) {
       return Container(
-        padding: const EdgeInsets.all(16),
-        child: const Row(
+        padding: const EdgeInsets.all(20),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.sim_card_outlined, color: Colors.grey),
-            SizedBox(width: 8),
-            Text('No SIM info received yet', style: TextStyle(color: Colors.grey)),
+            Icon(Icons.sim_card_outlined, color: Colors.white.withValues(alpha: 0.2), size: 20),
+            const SizedBox(width: 8),
+            Text('Waiting for SIM card data...', style: GoogleFonts.inter(color: Colors.white30, fontSize: 13)),
           ],
         ),
       );
     }
 
-    return Container(
+    return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: List.generate(displaySims.length, (index) {
           final sim = displaySims[index];
           final slotNumber = ((sim['sim_slot'] as int?) ?? index) + 1;
           final phoneNum = sim['phone_number'] ?? 'No Number';
-          final carrier = sim['carrier_name'] ?? 'Unknown Carrier';
+          final carrier = sim['carrier_name'] ?? 'Unknown';
           final devName = sim['device_name'] ?? 'Phone';
 
+          final gradientColors = slotNumber == 1
+              ? [const Color(0xFF1F6FEB), const Color(0xFF388BFD)]
+              : [const Color(0xFF238636), const Color(0xFF2EA043)];
+
           return Expanded(
-            child: Card(
-              elevation: 4,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(16),
-                  gradient: LinearGradient(
-                    colors: slotNumber == 1
-                        ? [Colors.blue[700]!, Colors.blue[900]!]
-                        : [Colors.teal[700]!, Colors.teal[900]!],
-                    begin: Alignment.topLeft,
-                    end: Alignment.bottomRight,
-                  ),
-                ),
-                padding: const EdgeInsets.all(14),
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(10),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.2),
-                        shape: BoxShape.circle,
-                      ),
-                      child: const Icon(Icons.sim_card, color: Colors.white, size: 26),
+            child: Padding(
+              padding: EdgeInsets.only(left: index > 0 ? 10 : 0),
+              child: AnimatedBuilder(
+                animation: _glowController,
+                builder: (context, child) {
+                  return CustomPaint(
+                    foregroundPainter: _GlowBorderPainter(
+                      progress: _glowController.value,
+                      color: gradientColors[0],
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                            children: [
-                              Text(
-                                'SIM $slotNumber',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.white70,
-                                  fontSize: 12,
-                                  letterSpacing: 1,
-                                ),
-                              ),
-                              Text(
-                                devName,
-                                style: const TextStyle(color: Colors.white54, fontSize: 11),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 2),
-                          InkWell(
-                            onTap: () => _copyToClipboard(phoneNum, 'SIM $slotNumber Number'),
-                            child: Row(
+                    child: child,
+                  );
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(16),
+                    gradient: LinearGradient(
+                      colors: [
+                        gradientColors[0].withValues(alpha: 0.15),
+                        gradientColors[1].withValues(alpha: 0.05),
+                      ],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    border: Border.all(color: gradientColors[0].withValues(alpha: 0.2)),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(colors: gradientColors),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.sim_card_rounded, color: Colors.white, size: 22),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
-                                Expanded(
-                                  child: Text(
-                                    phoneNum,
-                                    style: const TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white,
-                                    ),
+                                Text(
+                                  'SIM $slotNumber',
+                                  style: GoogleFonts.inter(
+                                    fontWeight: FontWeight.w700,
+                                    color: gradientColors[0],
+                                    fontSize: 11,
+                                    letterSpacing: 1.5,
                                   ),
                                 ),
-                                const Icon(Icons.copy, color: Colors.white70, size: 16),
+                                Text(devName, style: GoogleFonts.inter(color: Colors.white30, fontSize: 10)),
                               ],
                             ),
-                          ),
-                          Text(
-                            carrier,
-                            style: const TextStyle(fontSize: 12, color: Colors.white60),
-                          ),
-                        ],
+                            const SizedBox(height: 4),
+                            InkWell(
+                              onTap: () => _copyToClipboard(phoneNum, 'SIM $slotNumber'),
+                              borderRadius: BorderRadius.circular(6),
+                              child: Row(
+                                children: [
+                                  Expanded(
+                                    child: Text(
+                                      phoneNum,
+                                      style: GoogleFonts.jetBrainsMono(
+                                        fontSize: 15,
+                                        fontWeight: FontWeight.w600,
+                                        color: Colors.white,
+                                        letterSpacing: 1,
+                                      ),
+                                    ),
+                                  ),
+                                  Icon(Icons.copy_rounded, color: Colors.white.withValues(alpha: 0.3), size: 14),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(carrier, style: GoogleFonts.inter(fontSize: 11, color: Colors.white38)),
+                          ],
+                        ),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -401,46 +530,74 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     );
   }
 
+  // ──────────────────────────────────────────
+  // Discovered Clients
+  // ──────────────────────────────────────────
   Widget _buildDiscoveredClientsSection() {
     if (_discoveredClients.isEmpty) return const SizedBox.shrink();
 
     return Container(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.indigo.withValues(alpha: 0.08),
+        color: const Color(0xFFD2A8FF).withValues(alpha: 0.06),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.indigo.withValues(alpha: 0.2)),
+        border: Border.all(color: const Color(0xFFD2A8FF).withValues(alpha: 0.15)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              ScaleTransition(
-                scale: _pulseAnimation!,
-                child: const Icon(Icons.wifi_find, color: Colors.indigo),
+              AnimatedBuilder(
+                animation: _glowController,
+                builder: (context, child) {
+                  return Transform.rotate(
+                    angle: _glowController.value * 2 * pi,
+                    child: child,
+                  );
+                },
+                child: const Icon(Icons.wifi_find_rounded, color: Color(0xFFD2A8FF), size: 20),
               ),
-              const SizedBox(width: 8),
-              const Text(
-                'Auto-Discovered Devices on Local Wi-Fi Network',
-                style: TextStyle(fontWeight: FontWeight.bold, color: Colors.indigo),
+              const SizedBox(width: 10),
+              Text(
+                'Discovered Devices',
+                style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: const Color(0xFFD2A8FF), fontSize: 13),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: _discoveredClients.map((client) {
-              return ActionChip(
-                avatar: const Icon(Icons.smartphone, size: 18, color: Colors.indigo),
-                label: Text('${client.name} (${client.address})'),
-                backgroundColor: Colors.white,
-                elevation: 2,
-                onPressed: () {
-                  widget.service.connectToDiscoveredClient(client);
-                },
+              return Material(
+                color: const Color(0xFF21262D),
+                borderRadius: BorderRadius.circular(10),
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(10),
+                  onTap: () => widget.service.connectToDiscoveredClient(client),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFFD2A8FF).withValues(alpha: 0.2)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.smartphone_rounded, size: 16, color: Color(0xFFD2A8FF)),
+                        const SizedBox(width: 8),
+                        Text(
+                          '${client.name} (${client.address})',
+                          style: GoogleFonts.inter(fontSize: 12, color: Colors.white70),
+                        ),
+                        const SizedBox(width: 6),
+                        const Icon(Icons.arrow_forward_ios_rounded, size: 10, color: Colors.white30),
+                      ],
+                    ),
+                  ),
+                ),
               );
             }).toList(),
           ),
@@ -449,6 +606,36 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     );
   }
 
+  // ──────────────────────────────────────────
+  // Empty state widget
+  // ──────────────────────────────────────────
+  Widget _buildEmptyState(IconData icon, String text) {
+    return Center(
+      child: FadeTransition(
+        opacity: _fadeAnimation,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: Colors.white.withValues(alpha: 0.03),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+              ),
+              child: Icon(icon, size: 48, color: Colors.white.withValues(alpha: 0.15)),
+            ),
+            const SizedBox(height: 16),
+            Text(text, style: GoogleFonts.inter(color: Colors.white30, fontSize: 14)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ──────────────────────────────────────────
+  // SMS Tab
+  // ──────────────────────────────────────────
   Widget _buildSmsTab() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -456,78 +643,106 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
         _buildDeviceSelectorBar(),
         _buildSimCardsSection(),
         _buildDiscoveredClientsSection(),
-        const Divider(height: 1),
+        Divider(height: 1, color: Colors.white.withValues(alpha: 0.06)),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
           child: Row(
             children: [
-              const Icon(Icons.sms, size: 20, color: Colors.blue),
+              const Icon(Icons.sms_rounded, size: 18, color: Color(0xFF58A6FF)),
               const SizedBox(width: 8),
               Text(
-                'SMS Messages (${_messages.length})',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                'Messages (${_messages.length})',
+                style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white70),
               ),
             ],
           ),
         ),
         Expanded(
           child: _messages.isEmpty
-              ? const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.inbox, size: 64, color: Colors.grey),
-                      SizedBox(height: 12),
-                      Text('No messages received yet', style: TextStyle(color: Colors.grey)),
-                    ],
-                  ),
-                )
-              : ListView.separated(
+              ? _buildEmptyState(Icons.inbox_rounded, 'No messages received yet')
+              : ListView.builder(
                   itemCount: _messages.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
                   itemBuilder: (context, index) {
                     final msg = _messages[index];
                     final date = DateTime.fromMillisecondsSinceEpoch(msg['date'] ?? 0);
                     final body = msg['body'] ?? '';
                     final isReceived = msg['type'] == 1;
-                    final devName = msg['device_name'] ?? 'Android Phone';
+                    final devName = msg['device_name'] ?? 'Phone';
 
-                    return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: isReceived ? Colors.blue[100] : Colors.green[100],
-                        child: Icon(
-                          isReceived ? Icons.call_received : Icons.call_made,
-                          color: isReceived ? Colors.blue : Colors.green,
-                          size: 18,
-                        ),
-                      ),
-                      title: Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              msg['address'] ?? 'Unknown',
-                              style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+                      child: Material(
+                        color: const Color(0xFF161B22),
+                        borderRadius: BorderRadius.circular(12),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(12),
+                          onTap: () => _showMessageDetail(msg),
+                          child: Container(
+                            padding: const EdgeInsets.all(14),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                            ),
+                            child: Row(
+                              children: [
+                                // Colored accent strip
+                                Container(
+                                  width: 3,
+                                  height: 44,
+                                  decoration: BoxDecoration(
+                                    color: isReceived ? const Color(0xFF58A6FF) : const Color(0xFF7EE787),
+                                    borderRadius: BorderRadius.circular(2),
+                                  ),
+                                ),
+                                const SizedBox(width: 12),
+                                Expanded(
+                                  child: Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Row(
+                                        children: [
+                                          Expanded(
+                                            child: Text(
+                                              msg['address'] ?? 'Unknown',
+                                              style: GoogleFonts.inter(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 13,
+                                                color: Colors.white,
+                                              ),
+                                            ),
+                                          ),
+                                          _miniChip(devName, const Color(0xFF58A6FF)),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Text(
+                                        body,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: GoogleFonts.inter(fontSize: 12, color: Colors.white54, height: 1.4),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                    Text(
+                                      '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
+                                      style: GoogleFonts.jetBrainsMono(fontSize: 11, color: Colors.white30),
+                                    ),
+                                    Text(
+                                      '${date.month}/${date.day}',
+                                      style: GoogleFonts.inter(fontSize: 10, color: Colors.white.withValues(alpha: 0.2)),
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                           ),
-                          Text(
-                            devName,
-                            style: const TextStyle(fontSize: 11, color: Colors.indigo, fontWeight: FontWeight.bold),
-                          ),
-                        ],
+                        ),
                       ),
-                      subtitle: Text(
-                        body,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 13, color: Colors.black87),
-                      ),
-                      trailing: Text(
-                        '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}\n'
-                        '${date.month}/${date.day}',
-                        style: const TextStyle(fontSize: 11, color: Colors.grey),
-                        textAlign: TextAlign.right,
-                      ),
-                      onTap: () => _showMessageDetail(msg),
                     );
                   },
                 ),
@@ -536,89 +751,85 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     );
   }
 
+  // ──────────────────────────────────────────
+  // Text Tab
+  // ──────────────────────────────────────────
   Widget _buildTextTab() {
     return Column(
       children: [
         _buildDeviceSelectorBar(),
         Padding(
           padding: const EdgeInsets.all(16.0),
-          child: Card(
-            elevation: 3,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: Padding(
-              padding: const EdgeInsets.all(14.0),
-              child: Column(
-                children: [
-                  TextField(
-                    controller: _textSendController,
-                    maxLines: 4,
-                    decoration: InputDecoration(
-                      hintText: 'Type or paste formatted text to send to Android phone...',
-                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-                      filled: true,
-                      fillColor: Colors.grey[50],
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.paste, color: Colors.blue),
-                        tooltip: 'Paste from Clipboard',
-                        onPressed: () async {
-                          final data = await Clipboard.getData(Clipboard.kTextPlain);
-                          if (data?.text != null) {
-                            _textSendController.text = data!.text!;
-                          }
-                        },
-                      ),
+          child: Container(
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              color: const Color(0xFF161B22),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+            ),
+            child: Column(
+              children: [
+                TextField(
+                  controller: _textSendController,
+                  maxLines: 4,
+                  style: GoogleFonts.inter(color: Colors.white, fontSize: 14),
+                  decoration: InputDecoration(
+                    hintText: 'Type or paste text to send...',
+                    suffixIcon: IconButton(
+                      icon: Icon(Icons.paste_rounded, color: Colors.white.withValues(alpha: 0.4)),
+                      tooltip: 'Paste',
+                      onPressed: () async {
+                        final data = await Clipboard.getData(Clipboard.kTextPlain);
+                        if (data?.text != null) {
+                          _textSendController.text = data!.text!;
+                        }
+                      },
                     ),
                   ),
-                  const SizedBox(height: 10),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      OutlinedButton.icon(
-                        onPressed: () => _textSendController.clear(),
-                        icon: const Icon(Icons.clear_all),
-                        label: const Text('Clear'),
-                      ),
-                      const SizedBox(width: 8),
-                      ElevatedButton.icon(
-                        style: ElevatedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-                        ),
-                        icon: const Icon(Icons.send),
-                        label: const Text('Send Text to Phone'),
-                        onPressed: () {
-                          if (_textSendController.text.isNotEmpty) {
-                            widget.service.sendRawText(_textSendController.text);
-                            _textSendController.clear();
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () => _textSendController.clear(),
+                      icon: const Icon(Icons.clear_all_rounded, size: 18),
+                      label: const Text('Clear'),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.send_rounded, size: 18),
+                      label: const Text('Send'),
+                      onPressed: () {
+                        if (_textSendController.text.isNotEmpty) {
+                          widget.service.sendRawText(_textSendController.text);
+                          _textSendController.clear();
+                        }
+                      },
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
         ),
-        const Divider(height: 1),
         Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
           child: Row(
             children: [
-              const Icon(Icons.history, size: 20, color: Colors.purple),
+              const Icon(Icons.history_rounded, size: 18, color: Color(0xFFD2A8FF)),
               const SizedBox(width: 8),
               Text(
-                'Text Clipboard History (${_rawTexts.length})',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                'History (${_rawTexts.length})',
+                style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white70),
               ),
             ],
           ),
         ),
+        const SizedBox(height: 4),
         Expanded(
           child: _rawTexts.isEmpty
-              ? const Center(
-                  child: Text('No formatted text sent/received yet', style: TextStyle(color: Colors.grey)),
-                )
+              ? _buildEmptyState(Icons.text_snippet_outlined, 'No text exchanged yet')
               : ListView.builder(
                   itemCount: _rawTexts.length,
                   itemBuilder: (context, index) {
@@ -627,17 +838,42 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                     final sender = item['sender'] ?? 'Remote';
                     final date = DateTime.fromMillisecondsSinceEpoch(item['created_at'] ?? 0);
 
-                    return Card(
-                      elevation: 2,
-                      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                      child: ListTile(
-                        title: SelectableText(text, maxLines: 5),
-                        subtitle: Text('$sender • ${date.year}/${date.month}/${date.day} ${date.hour}:${date.minute.toString().padLeft(2, '0')}'),
-                        trailing: IconButton(
-                          icon: const Icon(Icons.copy, color: Colors.blue),
-                          tooltip: 'Copy to Clipboard',
-                          onPressed: () => _copyToClipboard(text, 'Text'),
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 3),
+                      child: Container(
+                        padding: const EdgeInsets.all(14),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF161B22),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            SelectableText(
+                              text,
+                              maxLines: 5,
+                              style: GoogleFonts.inter(fontSize: 13, color: Colors.white70, height: 1.5),
+                            ),
+                            const SizedBox(height: 8),
+                            Row(
+                              children: [
+                                _miniChip(sender, const Color(0xFFD2A8FF)),
+                                const SizedBox(width: 8),
+                                Text(
+                                  '${date.year}/${date.month}/${date.day} ${date.hour}:${date.minute.toString().padLeft(2, '0')}',
+                                  style: GoogleFonts.inter(fontSize: 11, color: Colors.white30),
+                                ),
+                                const Spacer(),
+                                IconButton(
+                                  icon: Icon(Icons.copy_rounded, color: Colors.white.withValues(alpha: 0.3), size: 16),
+                                  tooltip: 'Copy',
+                                  onPressed: () => _copyToClipboard(text, 'Text'),
+                                  visualDensity: VisualDensity.compact,
+                                ),
+                              ],
+                            ),
+                          ],
                         ),
                       ),
                     );
@@ -648,6 +884,9 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     );
   }
 
+  // ──────────────────────────────────────────
+  // File Tab
+  // ──────────────────────────────────────────
   Widget _buildFileTab() {
     return Column(
       children: [
@@ -656,29 +895,29 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
           padding: const EdgeInsets.all(16.0),
           child: Row(
             children: [
-              ElevatedButton.icon(
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 24),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              Expanded(
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    backgroundColor: const Color(0xFF1F6FEB),
+                  ),
+                  icon: const Icon(Icons.upload_file_rounded, size: 22),
+                  label: Text('Send File to Phone', style: GoogleFonts.inter(fontWeight: FontWeight.w600)),
+                  onPressed: _pickAndSendFile,
                 ),
-                icon: const Icon(Icons.upload_file, size: 24),
-                label: const Text('Send File to Phone', style: TextStyle(fontSize: 16)),
-                onPressed: _pickAndSendFile,
               ),
-              const SizedBox(width: 16),
+              const SizedBox(width: 12),
               OutlinedButton.icon(
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                 ),
-                icon: const Icon(Icons.folder_special, size: 20),
-                label: const Text('Open Downloads Folder'),
+                icon: const Icon(Icons.folder_open_rounded, size: 20),
+                label: const Text('Downloads'),
                 onPressed: _openDownloadsFolder,
               ),
             ],
           ),
         ),
-        const Divider(height: 1),
         Expanded(
           child: StreamBuilder<List<FileTransferItem>>(
             stream: widget.service.fileTransfer.transfersStream,
@@ -686,16 +925,7 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
             builder: (context, snapshot) {
               final transfers = snapshot.data ?? [];
               if (transfers.isEmpty) {
-                return const Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(Icons.folder_shared, size: 64, color: Colors.grey),
-                      SizedBox(height: 12),
-                      Text('No active or recent file transfers', style: TextStyle(color: Colors.grey)),
-                    ],
-                  ),
-                );
+                return _buildEmptyState(Icons.folder_shared_rounded, 'No file transfers yet');
               }
 
               return ListView.builder(
@@ -704,41 +934,55 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                   final item = transfers[index];
                   final sizeMb = (item.fileSize / (1024 * 1024)).toStringAsFixed(2);
                   final pct = (item.progress * 100).toInt();
+                  final isUp = item.isOutgoing;
 
-                  return Card(
-                    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                    elevation: 2,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(14),
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                    child: Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF161B22),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                      ),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Row(
                             children: [
-                              Icon(
-                                item.isOutgoing ? Icons.upload_file : Icons.download_for_offline,
-                                color: item.isOutgoing ? Colors.blue : Colors.green,
+                              Container(
+                                padding: const EdgeInsets.all(8),
+                                decoration: BoxDecoration(
+                                  color: (isUp ? const Color(0xFF58A6FF) : const Color(0xFF7EE787)).withValues(alpha: 0.15),
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(
+                                  isUp ? Icons.upload_rounded : Icons.download_rounded,
+                                  color: isUp ? const Color(0xFF58A6FF) : const Color(0xFF7EE787),
+                                  size: 20,
+                                ),
                               ),
-                              const SizedBox(width: 12),
+                              const SizedBox(width: 14),
                               Expanded(
                                 child: Text(
                                   item.fileName,
-                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                                  style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 14, color: Colors.white),
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              Text('$sizeMb MB', style: const TextStyle(color: Colors.grey)),
+                              Text('$sizeMb MB', style: GoogleFonts.inter(color: Colors.white30, fontSize: 12)),
                             ],
                           ),
-                          const SizedBox(height: 10),
-                          LinearProgressIndicator(
-                            value: item.progress,
-                            backgroundColor: Colors.grey[200],
-                            color: item.isCompleted ? Colors.green : Colors.blue,
-                            minHeight: 6,
+                          const SizedBox(height: 12),
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: LinearProgressIndicator(
+                              value: item.progress,
+                              color: item.isCompleted ? const Color(0xFF7EE787) : const Color(0xFF58A6FF),
+                              minHeight: 4,
+                            ),
                           ),
-                          const SizedBox(height: 6),
+                          const SizedBox(height: 8),
                           Row(
                             mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
@@ -747,16 +991,19 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                                     ? '✓ Complete'
                                     : item.isFailed
                                         ? '✗ Failed'
-                                        : '$pct% (${item.sender})',
-                                style: TextStyle(
-                                  color: item.isCompleted ? Colors.green : (item.isFailed ? Colors.red : Colors.blue),
-                                  fontWeight: FontWeight.bold,
+                                        : '$pct%',
+                                style: GoogleFonts.inter(
+                                  color: item.isCompleted
+                                      ? const Color(0xFF7EE787)
+                                      : (item.isFailed ? const Color(0xFFFF7B72) : const Color(0xFF58A6FF)),
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 12,
                                 ),
                               ),
                               if (item.isCompleted && item.localPath != null)
                                 TextButton.icon(
-                                  icon: const Icon(Icons.open_in_new, size: 16),
-                                  label: const Text('Open File'),
+                                  icon: const Icon(Icons.open_in_new_rounded, size: 14),
+                                  label: Text('Open', style: GoogleFonts.inter(fontSize: 12)),
                                   onPressed: () => FileLauncher.openFile(item.localPath!),
                                 ),
                             ],
@@ -774,71 +1021,106 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     );
   }
 
+  // ──────────────────────────────────────────
+  // Status Bar
+  // ──────────────────────────────────────────
   Widget _buildStatusBar() {
     final state = widget.service.state;
     final pin = widget.service.currentPin;
     final scope = widget.service.clientScope;
     final count = widget.service.connectedClientCount;
 
-    Color bgColor;
+    Color accentColor;
     String statusText;
     IconData statusIcon;
 
     switch (state) {
       case ServerState.paired:
-        bgColor = Colors.green[700]!;
-        statusText = 'Connected & Paired ($count Active Devices - ${scope.name})';
-        statusIcon = Icons.link;
+        accentColor = const Color(0xFF7EE787);
+        statusText = 'Connected • $count Devices • ${scope.name}';
+        statusIcon = Icons.link_rounded;
         break;
       case ServerState.connected:
-        bgColor = Colors.orange[800]!;
-        statusText = 'Client Connected ($count Devices) — Waiting for PIN';
-        statusIcon = Icons.lock_open;
+        accentColor = const Color(0xFFF0883E);
+        statusText = 'Device Connected ($count) — Awaiting PIN';
+        statusIcon = Icons.lock_open_rounded;
         break;
       case ServerState.advertising:
-        bgColor = Colors.blue[700]!;
-        statusText = 'Waiting for Auto-Connect or Client PIN...';
-        statusIcon = Icons.wifi;
+        accentColor = const Color(0xFF58A6FF);
+        statusText = 'Listening for devices...';
+        statusIcon = Icons.wifi_rounded;
         break;
       default:
-        bgColor = Colors.grey[700]!;
+        accentColor = Colors.white38;
         statusText = 'Server Idle';
-        statusIcon = Icons.power_settings_new;
+        statusIcon = Icons.power_settings_new_rounded;
     }
 
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      color: bgColor,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            accentColor.withValues(alpha: 0.1),
+            accentColor.withValues(alpha: 0.03),
+          ],
+        ),
+        border: Border(
+          bottom: BorderSide(color: accentColor.withValues(alpha: 0.2)),
+        ),
+      ),
       child: Row(
         children: [
-          ScaleTransition(
-            scale: _pulseAnimation!,
-            child: Icon(statusIcon, color: Colors.white, size: 20),
+          // Animated glowing dot
+          AnimatedBuilder(
+            animation: _glowController,
+            builder: (context, child) {
+              final pulse = 0.5 + 0.5 * sin(_glowController.value * 2 * pi);
+              return Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: accentColor,
+                  boxShadow: [
+                    BoxShadow(color: accentColor.withValues(alpha: pulse * 0.6), blurRadius: 8, spreadRadius: 2),
+                  ],
+                ),
+              );
+            },
           ),
+          const SizedBox(width: 10),
+          Icon(statusIcon, color: accentColor, size: 18),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               statusText,
-              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+              style: GoogleFonts.inter(
+                color: Colors.white.withValues(alpha: 0.8),
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
             ),
           ),
           if (pin != null && (state == ServerState.advertising || state == ServerState.connected))
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.2),
-                borderRadius: BorderRadius.circular(8),
+                color: Colors.white.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.white.withValues(alpha: 0.1)),
               ),
               child: Row(
                 children: [
-                  const Text('PIN: ', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  Icon(Icons.key_rounded, size: 14, color: Colors.white.withValues(alpha: 0.4)),
+                  const SizedBox(width: 8),
                   Text(
                     pin,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 22,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 4,
+                    style: GoogleFonts.jetBrainsMono(
+                      color: const Color(0xFFF0883E),
+                      fontSize: 20,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 6,
                     ),
                   ),
                 ],
@@ -847,14 +1129,13 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
           if (state == ServerState.paired || state == ServerState.connected)
             Padding(
               padding: const EdgeInsets.only(left: 12),
-              child: ElevatedButton.icon(
+              child: OutlinedButton.icon(
                 onPressed: () => widget.service.disconnectClient(),
-                icon: const Icon(Icons.link_off, size: 16),
-                label: const Text('Disconnect All'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.white,
-                  foregroundColor: Colors.red,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                icon: const Icon(Icons.link_off_rounded, size: 16, color: Color(0xFFFF7B72)),
+                label: Text('Disconnect', style: GoogleFonts.inter(color: const Color(0xFFFF7B72), fontSize: 12)),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Color(0xFFFF7B72)),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                 ),
               ),
             ),
@@ -867,28 +1148,44 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('SMS & Multi-Device Sync Server'),
-        elevation: 4,
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF58A6FF), Color(0xFF7EE787)],
+                ),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.sync_rounded, size: 18, color: Colors.white),
+            ),
+            const SizedBox(width: 12),
+            Text('SMS Sync', style: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 20)),
+          ],
+        ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh Data',
+            icon: Icon(Icons.refresh_rounded, color: Colors.white.withValues(alpha: 0.5)),
+            tooltip: 'Refresh',
             onPressed: _refreshData,
           ),
           IconButton(
-            icon: const Icon(Icons.delete_sweep),
+            icon: Icon(Icons.delete_outline_rounded, color: Colors.white.withValues(alpha: 0.5)),
             tooltip: 'Clear All Data',
             onPressed: () async {
               final confirmed = await showDialog<bool>(
                 context: context,
                 builder: (ctx) => AlertDialog(
                   title: const Text('Clear All Data?'),
-                  content: const Text('This will delete all synced SMS, text logs, and SIM info.'),
+                  content: const Text('This will delete all synced SMS, text, and SIM data.'),
                   actions: [
                     TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
                     ElevatedButton(
                       onPressed: () => Navigator.pop(ctx, true),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.red, foregroundColor: Colors.white),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFDA3633),
+                      ),
                       child: const Text('Clear All'),
                     ),
                   ],
@@ -900,13 +1197,14 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
               }
             },
           ),
+          const SizedBox(width: 4),
         ],
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
-            Tab(icon: Icon(Icons.sms), text: 'SMS & SIM Cards'),
-            Tab(icon: Icon(Icons.short_text), text: 'Text Clipboard Exchange'),
-            Tab(icon: Icon(Icons.folder_shared), text: 'File Sharing Hub'),
+            Tab(icon: Icon(Icons.sms_rounded, size: 20), text: 'SMS & SIM'),
+            Tab(icon: Icon(Icons.text_snippet_rounded, size: 20), text: 'Text Share'),
+            Tab(icon: Icon(Icons.folder_shared_rounded, size: 20), text: 'Files'),
           ],
         ),
       ),

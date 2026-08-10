@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'transport/websocket_transport.dart';
 import 'transport/nsd_service.dart';
 import 'client/client_sync_service.dart';
@@ -24,11 +25,127 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // Premium dark color scheme
+    const seedColor = Color(0xFF00BCD4); // Cyan accent
+    final darkScheme = ColorScheme.fromSeed(
+      seedColor: seedColor,
+      brightness: Brightness.dark,
+      surface: const Color(0xFF0D1117),
+      onSurface: const Color(0xFFE6EDF3),
+      primary: const Color(0xFF58A6FF),
+      onPrimary: const Color(0xFF0D1117),
+      secondary: const Color(0xFF7EE787),
+      onSecondary: const Color(0xFF0D1117),
+      tertiary: const Color(0xFFD2A8FF),
+      error: const Color(0xFFFF7B72),
+      surfaceContainerHighest: const Color(0xFF161B22),
+    );
+
     return MaterialApp(
       title: 'SMS Sync',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+        colorScheme: darkScheme,
         useMaterial3: true,
+        brightness: Brightness.dark,
+        scaffoldBackgroundColor: const Color(0xFF0D1117),
+        textTheme: GoogleFonts.interTextTheme(
+          ThemeData.dark().textTheme,
+        ),
+        appBarTheme: AppBarTheme(
+          backgroundColor: const Color(0xFF161B22),
+          foregroundColor: const Color(0xFFE6EDF3),
+          elevation: 0,
+          centerTitle: false,
+          titleTextStyle: GoogleFonts.inter(
+            fontSize: 20,
+            fontWeight: FontWeight.w700,
+            color: const Color(0xFFE6EDF3),
+            letterSpacing: -0.5,
+          ),
+        ),
+        cardTheme: CardThemeData(
+          color: const Color(0xFF161B22),
+          elevation: 0,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(color: Colors.white.withValues(alpha: 0.06)),
+          ),
+        ),
+        inputDecorationTheme: InputDecorationTheme(
+          filled: true,
+          fillColor: const Color(0xFF0D1117),
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(12),
+            borderSide: const BorderSide(color: Color(0xFF58A6FF), width: 2),
+          ),
+          hintStyle: TextStyle(color: Colors.white.withValues(alpha: 0.3)),
+        ),
+        tabBarTheme: TabBarThemeData(
+          indicatorColor: const Color(0xFF58A6FF),
+          labelColor: const Color(0xFF58A6FF),
+          unselectedLabelColor: Colors.white.withValues(alpha: 0.5),
+          indicatorSize: TabBarIndicatorSize.label,
+          dividerColor: Colors.transparent,
+          labelStyle: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13),
+          unselectedLabelStyle: GoogleFonts.inter(fontWeight: FontWeight.w400, fontSize: 13),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF238636),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            textStyle: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 14),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFFE6EDF3),
+            side: BorderSide(color: Colors.white.withValues(alpha: 0.15)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            textStyle: GoogleFonts.inter(fontWeight: FontWeight.w500, fontSize: 14),
+          ),
+        ),
+        chipTheme: ChipThemeData(
+          backgroundColor: const Color(0xFF21262D),
+          selectedColor: const Color(0xFF1F6FEB).withValues(alpha: 0.3),
+          labelStyle: GoogleFonts.inter(fontSize: 12, color: const Color(0xFFE6EDF3)),
+          side: BorderSide(color: Colors.white.withValues(alpha: 0.1)),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        ),
+        snackBarTheme: SnackBarThemeData(
+          backgroundColor: const Color(0xFF21262D),
+          contentTextStyle: GoogleFonts.inter(color: const Color(0xFFE6EDF3)),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        ),
+        dialogTheme: DialogThemeData(
+          backgroundColor: const Color(0xFF161B22),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          titleTextStyle: GoogleFonts.inter(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            color: const Color(0xFFE6EDF3),
+          ),
+        ),
+        dividerTheme: DividerThemeData(
+          color: Colors.white.withValues(alpha: 0.06),
+          thickness: 1,
+        ),
+        progressIndicatorTheme: const ProgressIndicatorThemeData(
+          linearTrackColor: Color(0xFF21262D),
+          color: Color(0xFF58A6FF),
+        ),
       ),
       home: const Initializer(),
     );
@@ -59,6 +176,14 @@ class _InitializerState extends State<Initializer> {
       _isServer = false;
       _service = ClientSyncService(transport, discovery);
     }
+  }
+
+  @override
+  void dispose() {
+    if (_service != null) {
+      (_service as dynamic).dispose();
+    }
+    super.dispose();
   }
 
   @override

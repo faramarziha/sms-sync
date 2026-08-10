@@ -233,6 +233,7 @@ class ServerSyncService {
     _cleanUpAllDisconnectedDevices();
     await transport.disconnect();
     pairing.reset();
+    await startServer();
   }
 
   Future<void> stopServer() async {

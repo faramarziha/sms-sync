@@ -80,7 +80,7 @@ class WebSocketTransport implements SyncTransport {
       _server = null;
     }
 
-    _server = await HttpServer.bind(InternetAddress.anyIPv4, port);
+    _server = await HttpServer.bind(InternetAddress.anyIPv4, port, shared: true);
     debugPrint("Server listening on 0.0.0.0:$port");
     _server?.transform(WebSocketTransformer()).listen((WebSocket socket) {
       debugPrint("Incoming client socket connection accepted");

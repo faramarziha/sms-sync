@@ -10,6 +10,8 @@ import '../../core/models/sync_message.dart';
 import '../../core/file_transfer_service.dart';
 import '../client_sync_service.dart';
 import '../../transport/sync_transport.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
+import 'dart:convert';
 
 // ──────────────────────────────────────────
 // Radar Sweep Painter
@@ -378,6 +380,75 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     );
   }
 
+  void _showQrScannerDialog() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF161B22),
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+      builder: (context) {
+        return Container(
+          height: 480,
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+              ),
+              const SizedBox(height: 16),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF58A6FF)),
+                  const SizedBox(width: 8),
+                  Text('اسکن کد QR سرور', style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
+                ],
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(16),
+                  child: MobileScanner(
+                    onDetect: (capture) async {
+                      final List<Barcode> barcodes = capture.barcodes;
+                      for (final barcode in barcodes) {
+                        final raw = barcode.rawValue;
+                        if (raw != null && raw.isNotEmpty) {
+                          try {
+                            final data = jsonDecode(raw) as Map<String, dynamic>;
+                            final address = data['address'] as String?;
+                            final port = data['port'] as int? ?? 8080;
+                            final pin = data['pin'] as String?;
+
+                            if (address != null && pin != null) {
+                              Navigator.pop(context);
+                              await widget.service.connectToServer(
+                                DiscoveredServer(name: 'Scanned PC', address: address, port: port),
+                              );
+                              await widget.service.sendPairRequest(pin);
+                              break;
+                            }
+                          } catch (_) {}
+                        }
+                      }
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                'کد QR نمایش داده شده روی نسخه ویندوز را اسکن کنید.',
+                style: GoogleFonts.inter(fontSize: 12, color: Colors.white54),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   void _showManualConnectDialog() {
     showModalBottomSheet(
       context: context,
@@ -593,8 +664,27 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                 ),
                 const SizedBox(height: 10),
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
                   children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        icon: const Icon(Icons.assignment_return_rounded, size: 16, color: Color(0xFF58A6FF)),
+                        label: Text('ارسال کلیپ‌بورد به کامپیوتر', style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF58A6FF))),
+                        onPressed: () async {
+                          final text = await widget.service.clipboardService.getText();
+                          if (text != null && text.isNotEmpty) {
+                            widget.service.sendRawText(text);
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('متن کلیپ‌بورد به کامپیوتر ارسال شد'),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
                     OutlinedButton(
                       onPressed: () => _textInputController.clear(),
                       child: const Text('Clear'),
@@ -929,19 +1019,34 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
               },
             ),
           ),
-        // Manual connect button
+        // QR Scanner & Manual connect buttons
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-          child: SizedBox(
-            width: double.infinity,
-            child: OutlinedButton.icon(
-              icon: const Icon(Icons.edit_rounded, size: 18),
-              label: const Text('Connect via IP'),
-              style: OutlinedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(vertical: 14),
+          child: Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  icon: const Icon(Icons.qr_code_scanner_rounded, size: 20),
+                  label: const Text('اسکن کد QR'),
+                  style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    backgroundColor: const Color(0xFF1F6FEB),
+                  ),
+                  onPressed: _showQrScannerDialog,
+                ),
               ),
-              onPressed: _showManualConnectDialog,
-            ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.edit_rounded, size: 18),
+                  label: const Text('آدرس IP'),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                  onPressed: _showManualConnectDialog,
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -1072,6 +1177,11 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF58A6FF), size: 22),
+            tooltip: 'Scan QR Code',
+            onPressed: _showQrScannerDialog,
+          ),
           IconButton(
             icon: Icon(Icons.refresh_rounded, color: Colors.white.withValues(alpha: 0.5), size: 22),
             tooltip: 'Rescan',

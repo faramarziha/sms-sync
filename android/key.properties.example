@@ -1,0 +1,7 @@
+# Release keystore configuration
+# Copy this file as 'key.properties' and fill in your values.
+# NEVER commit key.properties to version control!
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=YOUR_KEY_ALIAS
+storeFile=PATH_TO_YOUR_KEYSTORE.jks

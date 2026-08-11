@@ -9,6 +9,9 @@ import '../transport/sync_transport.dart';
 import '../transport/nsd_service.dart';
 import '../platform/android_native_bridge.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../core/clipboard_service.dart';
+import '../core/utils/otp_extractor.dart';
 
 enum ClientState { idle, browsing, connecting, pairing, syncing, synced, error }
 
@@ -17,6 +20,7 @@ class ClientSyncService {
   final DiscoveryService discovery;
   final AndroidNativeBridge nativeBridge = AndroidNativeBridge();
   final FileTransferService fileTransfer = FileTransferService();
+  final ClipboardService clipboardService = ClipboardService();
 
   /// Stable device ID derived from platform hash — survives app restarts
   late final String deviceId;
@@ -27,6 +31,23 @@ class ClientSyncService {
 
   SyncScope _scope = SyncScope.both;
   SyncScope get scope => _scope;
+
+  static const String _scopePrefKey = 'sync_scope';
+
+  /// Load previously saved scope from persistent storage
+  Future<void> loadSavedScope() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedScope = prefs.getString(_scopePrefKey);
+      if (savedScope != null) {
+        try {
+          _scope = SyncScope.values.byName(savedScope);
+        } catch (_) {}
+      }
+    } catch (e) {
+      debugPrint('Failed to load saved scope: $e');
+    }
+  }
 
   Timer? _periodicSyncTimer;
 
@@ -53,10 +74,52 @@ class ClientSyncService {
     transport.connectionStatus.listen((connected) {
       if (!connected && (_state == ClientState.synced || _state == ClientState.syncing || _state == ClientState.pairing)) {
         _stopPeriodicSync();
+        clipboardService.stopMonitoring();
         _stopForegroundService();
         _updateState(ClientState.idle);
       }
     });
+
+    // Listen to real-time incoming SMS events from Android BroadcastReceiver
+    nativeBridge.onSmsReceivedStream.listen((sms) {
+      _handleIncomingSms(sms);
+    });
+  }
+
+  Future<void> _handleIncomingSms(Map<String, dynamic> sms) async {
+    final body = sms['body'] as String? ?? '';
+    final address = sms['address'] as String? ?? 'SMS';
+
+    // Send single incoming SMS to server
+    final smsPayload = Map<String, dynamic>.from(sms);
+    smsPayload['device_id'] = deviceId;
+    smsPayload['device_name'] = deviceName;
+    try {
+      await transport.send(SyncMessage(
+        type: SyncMessageType.sms,
+        payload: smsPayload,
+      ));
+    } catch (_) {}
+
+    // Extract OTP from real-time incoming SMS
+    final otp = OtpExtractor.extractOtp(body);
+    if (otp != null) {
+      debugPrint("Real-time OTP extracted: $otp from $address");
+      try {
+        await transport.send(SyncMessage(
+          type: SyncMessageType.otpCode,
+          payload: {
+            'otp': otp,
+            'sender': address,
+            'device_id': deviceId,
+            'device_name': deviceName,
+            'timestamp': DateTime.now().millisecondsSinceEpoch,
+          },
+        ));
+      } catch (e) {
+        debugPrint("Failed to send OTP code message: $e");
+      }
+    }
   }
 
   void _updateState(ClientState newState) {
@@ -92,6 +155,13 @@ class ClientSyncService {
 
   Future<void> sendPairRequest(String pin, {SyncScope scope = SyncScope.both}) async {
     _scope = scope;
+    // Persist scope selection
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_scopePrefKey, scope.name);
+    } catch (e) {
+      debugPrint('Failed to save scope preference: $e');
+    }
     await transport.send(SyncMessage(
       type: SyncMessageType.pairVerify,
       payload: {
@@ -120,6 +190,12 @@ class ClientSyncService {
         break;
       case SyncMessageType.fileChunk:
         await fileTransfer.handleFileChunk(message.payload);
+        break;
+      case SyncMessageType.clipboardSync:
+        final text = message.payload['text'] as String?;
+        if (text != null && text.isNotEmpty) {
+          await clipboardService.setText(text);
+        }
         break;
       default:
         break;
@@ -167,32 +243,51 @@ class ClientSyncService {
       if (_scope == SyncScope.smsSim || _scope == SyncScope.both) {
         if (await Permission.sms.request().isGranted &&
             await Permission.phone.request().isGranted) {
+          // Also request notification permission on Android 13+
+          if (Platform.isAndroid) {
+            await Permission.notification.request();
+          }
 
           final sims = await nativeBridge.getSubscriptionInfo();
-          for (var sim in sims) {
-            final simPayload = Map<String, dynamic>.from(sim);
-            simPayload['device_id'] = deviceId;
-            simPayload['device_name'] = deviceName;
+          if (sims.isNotEmpty) {
+            final simPayloads = sims.map((sim) {
+              final simPayload = Map<String, dynamic>.from(sim);
+              simPayload['device_id'] = deviceId;
+              simPayload['device_name'] = deviceName;
+              return simPayload;
+            }).toList();
             await transport.send(SyncMessage(
-              type: SyncMessageType.contactInfo,
-              payload: simPayload,
+              type: SyncMessageType.contactInfoBatch,
+              payload: {
+                'device_id': deviceId,
+                'device_name': deviceName,
+                'records': simPayloads,
+              },
             ));
           }
 
           final smsList = await nativeBridge.getRecentSms(limit: 100);
-          for (var sms in smsList) {
-            final smsPayload = Map<String, dynamic>.from(sms);
-            smsPayload['device_id'] = deviceId;
-            smsPayload['device_name'] = deviceName;
+          if (smsList.isNotEmpty) {
+            final smsPayloads = smsList.map((sms) {
+              final smsPayload = Map<String, dynamic>.from(sms);
+              smsPayload['device_id'] = deviceId;
+              smsPayload['device_name'] = deviceName;
+              return smsPayload;
+            }).toList();
             await transport.send(SyncMessage(
-              type: SyncMessageType.sms,
-              payload: smsPayload,
+              type: SyncMessageType.smsBatch,
+              payload: {
+                'device_id': deviceId,
+                'device_name': deviceName,
+                'records': smsPayloads,
+              },
             ));
           }
         }
       }
 
       _updateState(ClientState.synced);
+      _startClipboardSync();
       _startPeriodicSync();
     } catch (e) {
       debugPrint('Sync error: $e');
@@ -215,9 +310,25 @@ class ClientSyncService {
     _periodicSyncTimer = null;
   }
 
+  void _startClipboardSync() {
+    clipboardService.startMonitoring((newText) {
+      if (_state == ClientState.synced) {
+        transport.send(SyncMessage(
+          type: SyncMessageType.clipboardSync,
+          payload: {
+            'text': newText,
+            'device_id': deviceId,
+            'device_name': deviceName,
+          },
+        ));
+      }
+    });
+  }
+
   Future<void> disconnect() async {
     _stopPeriodicSync();
     _stopForegroundService();
+    clipboardService.stopMonitoring();
     await transport.disconnect();
     _updateState(ClientState.idle);
   }
@@ -225,6 +336,7 @@ class ClientSyncService {
   Future<void> dispose() async {
     _stopPeriodicSync();
     _stopForegroundService();
+    clipboardService.dispose();
     fileTransfer.dispose();
     await discovery.stopBrowsing();
     await discovery.stopAdvertising();

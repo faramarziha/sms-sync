@@ -14,8 +14,10 @@
          For personal use, developer debugging, or sideloaded APK deployment, standard
          runtime permission granting works directly without default SMS handler status. -->
     <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.READ_PHONE_NUMBERS" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Foreground service & WakeLock permissions for persistent background sync -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

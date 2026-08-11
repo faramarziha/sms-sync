@@ -1,4 +1,4 @@
-package com.example.sms_sync
+package com.faramarzi.smssync
 
 import android.app.Notification
 import android.app.NotificationChannel

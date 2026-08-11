@@ -1,8 +1,25 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 class AndroidNativeBridge {
-  static const MethodChannel _channel = MethodChannel('com.example.sms_sync/native_channel');
+  static const MethodChannel _channel = MethodChannel('com.faramarzi.smssync/native_channel');
+
+  static final _onSmsReceivedController = StreamController<Map<String, dynamic>>.broadcast();
+  Stream<Map<String, dynamic>> get onSmsReceivedStream => _onSmsReceivedController.stream;
+
+  AndroidNativeBridge() {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onSmsReceived') {
+        try {
+          final data = Map<String, dynamic>.from(call.arguments);
+          _onSmsReceivedController.add(data);
+        } catch (e) {
+          debugPrint("Error processing incoming SMS method call: $e");
+        }
+      }
+    });
+  }
 
   Future<List<Map<String, dynamic>>> getSubscriptionInfo() async {
     try {

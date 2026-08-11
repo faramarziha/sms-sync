@@ -7,7 +7,11 @@ import '../transport/sync_transport.dart';
 import '../transport/websocket_transport.dart';
 import '../transport/nsd_service.dart';
 import '../core/pairing_service.dart';
+import '../core/clipboard_service.dart';
 import 'db/database_service.dart';
+import 'dart:convert';
+
+import 'package:shared_preferences/shared_preferences.dart';
 
 enum ServerState { idle, advertising, connected, paired }
 
@@ -29,6 +33,21 @@ class ServerSyncService {
   final PairingService pairing = PairingService();
   final DatabaseService db = DatabaseService();
   final FileTransferService fileTransfer = FileTransferService();
+  final ClipboardService clipboardService = ClipboardService();
+
+  int _serverPort = 8080;
+  String? _serverIp;
+
+  bool isOtpExtractionEnabled = true;
+  bool isClipboardSyncEnabled = true;
+  final List<Map<String, String>> otpHistory = [];
+
+  static const String _otpPrefKey = 'server_otp_enabled';
+  static const String _clipPrefKey = 'server_clipboard_enabled';
+
+  /// Stream to notify Desktop UI when an OTP code is received
+  final _otpNotificationController = StreamController<Map<String, String>>.broadcast();
+  Stream<Map<String, String>> get otpNotificationStream => _otpNotificationController.stream;
 
   /// Set of device IDs that have successfully verified the PIN for this session
   final Set<String> _pairedDeviceIds = {};
@@ -52,7 +71,40 @@ class ServerSyncService {
       ? (transport as WebSocketTransport).currentClientCount 
       : 0;
 
+  Future<void> loadPreferences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      isOtpExtractionEnabled = prefs.getBool(_otpPrefKey) ?? true;
+      isClipboardSyncEnabled = prefs.getBool(_clipPrefKey) ?? true;
+      _dataUpdatedController.add(null);
+    } catch (_) {}
+  }
+
+  Future<void> setOtpExtractionEnabled(bool enabled) async {
+    isOtpExtractionEnabled = enabled;
+    _dataUpdatedController.add(null);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_otpPrefKey, enabled);
+    } catch (_) {}
+  }
+
+  Future<void> setClipboardSyncEnabled(bool enabled) async {
+    isClipboardSyncEnabled = enabled;
+    if (!enabled) {
+      clipboardService.stopMonitoring();
+    } else {
+      _startClipboardSync();
+    }
+    _dataUpdatedController.add(null);
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_clipPrefKey, enabled);
+    } catch (_) {}
+  }
+
   ServerSyncService(this.transport, this.discovery) {
+    loadPreferences();
     transport.messages.listen((message) {
       _handleMessage(message).catchError((e) {
         debugPrint('Error handling message: $e');
@@ -81,6 +133,7 @@ class ServerSyncService {
   }
 
   Future<void> startServer({int port = 8080, String name = 'MySyncServer'}) async {
+    _serverPort = port;
     await transport.startServer(port);
     await discovery.startAdvertising(name, port, type: 'mysync');
     if (discovery is NsdDiscoveryService) {
@@ -88,8 +141,35 @@ class ServerSyncService {
     } else {
       await discovery.startBrowsing();
     }
+    _fetchLocalIp();
     _updateState(ServerState.advertising);
     pairing.generatePin();
+    _startClipboardSync();
+  }
+
+  Future<void> _fetchLocalIp() async {
+    try {
+      final interfaces = await NetworkInterface.list(type: InternetAddressType.IPv4);
+      for (var iface in interfaces) {
+        for (var addr in iface.addresses) {
+          if (!addr.isLoopback) {
+            _serverIp = addr.address;
+            return;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  String? get currentPin => pairing.currentPin;
+
+  /// JSON payload for generating pairing QR code
+  String get qrPairingPayload {
+    return jsonEncode({
+      'address': _serverIp ?? '127.0.0.1',
+      'port': _serverPort,
+      'pin': pairing.currentPin ?? '',
+    });
   }
 
   /// Initiates a connection from Server to a discovered Android Client device
@@ -101,8 +181,6 @@ class ServerSyncService {
       debugPrint("Failed to connect to client ${client.name}: $e");
     }
   }
-
-  String? get currentPin => pairing.currentPin;
 
   Future<void> _handleMessage(SyncMessage message) async {
     final devId = message.payload['device_id'] as String? ?? 'unknown';
@@ -186,6 +264,61 @@ class ServerSyncService {
         }
         break;
 
+      case SyncMessageType.smsBatch:
+        if (_pairedDeviceIds.contains(devId)) {
+          final records = (message.payload['records'] as List<dynamic>?) ?? [];
+          final smsList = records.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+          await db.insertSmsBatch(smsList);
+          _dataUpdatedController.add(null);
+        } else {
+          debugPrint("Rejected smsBatch payload from unpaired device: $devId");
+        }
+        break;
+
+      case SyncMessageType.contactInfoBatch:
+        if (_pairedDeviceIds.contains(devId)) {
+          final records = (message.payload['records'] as List<dynamic>?) ?? [];
+          final sims = records.map((r) => Map<String, dynamic>.from(r as Map)).toList();
+          await db.insertSimBatch(sims);
+          _dataUpdatedController.add(null);
+        } else {
+          debugPrint("Rejected contactInfoBatch payload from unpaired device: $devId");
+        }
+        break;
+
+      case SyncMessageType.clipboardSync:
+        if (_pairedDeviceIds.contains(devId) && isClipboardSyncEnabled) {
+          final text = message.payload['text'] as String?;
+          if (text != null && text.isNotEmpty) {
+            await clipboardService.setText(text);
+          }
+        }
+        break;
+
+      case SyncMessageType.otpCode:
+        if (_pairedDeviceIds.contains(devId)) {
+          final otp = message.payload['otp'] as String?;
+          final sender = message.payload['sender'] as String? ?? 'SMS';
+          if (otp != null && otp.isNotEmpty) {
+            // Save to OTP history
+            final entry = {
+              'otp': otp,
+              'sender': sender,
+              'timestamp': DateTime.now().millisecondsSinceEpoch.toString(),
+            };
+            otpHistory.insert(0, entry);
+            if (otpHistory.length > 20) otpHistory.removeLast();
+
+            // Auto copy OTP directly to Windows Clipboard IF toggle is enabled!
+            if (isOtpExtractionEnabled) {
+              await clipboardService.setText(otp);
+              _otpNotificationController.add({'otp': otp, 'sender': sender});
+            }
+            _dataUpdatedController.add(null);
+          }
+        }
+        break;
+
       default:
         break;
     }
@@ -221,8 +354,9 @@ class ServerSyncService {
   }
 
   void _cleanUpAllDisconnectedDevices() {
-    for (var devId in _connectedDevices.keys) {
-      db.deleteDataForDevice(devId);
+    final deviceIds = _connectedDevices.keys.toList();
+    if (deviceIds.isNotEmpty) {
+      db.deleteDataForDevices(deviceIds);
     }
     _pairedDeviceIds.clear();
     _connectedDevices.clear();
@@ -236,8 +370,25 @@ class ServerSyncService {
     await startServer();
   }
 
+  void _startClipboardSync() {
+    if (!isClipboardSyncEnabled) return;
+    clipboardService.startMonitoring((newText) {
+      if (_pairedDeviceIds.isNotEmpty && isClipboardSyncEnabled) {
+        transport.send(SyncMessage(
+          type: SyncMessageType.clipboardSync,
+          payload: {
+            'text': newText,
+            'device_id': 'pc',
+            'device_name': 'Windows PC',
+          },
+        ));
+      }
+    });
+  }
+
   Future<void> stopServer() async {
     _cleanUpAllDisconnectedDevices();
+    clipboardService.stopMonitoring();
     await discovery.stopAdvertising();
     await discovery.stopBrowsing();
     await transport.disconnect();
@@ -246,8 +397,10 @@ class ServerSyncService {
 
   Future<void> dispose() async {
     await stopServer();
+    clipboardService.dispose();
     fileTransfer.dispose();
     _stateController.close();
     _dataUpdatedController.close();
+    _otpNotificationController.close();
   }
 }

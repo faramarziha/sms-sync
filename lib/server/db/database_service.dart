@@ -93,8 +93,12 @@ class DatabaseService {
   }
 
   String _calculateHash(Map<String, dynamic> sms) {
-    final data = "${sms['device_id']}${sms['address']}${sms['date']}${sms['body']}";
-    return sha256.convert(utf8.encode(data)).toString();
+    final sb = StringBuffer()
+      ..write(sms['device_id'] ?? '')
+      ..write(sms['address'] ?? '')
+      ..write(sms['date'] ?? '')
+      ..write(sms['body'] ?? '');
+    return sha256.convert(utf8.encode(sb.toString())).toString();
   }
 
   Future<void> insertOrUpdateSms(Map<String, dynamic> sms) async {
@@ -191,6 +195,76 @@ class DatabaseService {
     await db.delete('sms_messages', where: 'device_id = ?', whereArgs: [deviceId]);
     await db.delete('sim_subscriptions', where: 'device_id = ?', whereArgs: [deviceId]);
     await db.delete('raw_texts', where: 'device_id = ?', whereArgs: [deviceId]);
+  }
+
+  /// Batch-delete data for multiple devices in a single transaction (Items 5/6)
+  Future<void> deleteDataForDevices(List<String> deviceIds) async {
+    if (deviceIds.isEmpty) return;
+    final db = await database;
+    final placeholders = List.filled(deviceIds.length, '?').join(', ');
+    final whereClause = 'device_id IN ($placeholders)';
+    await db.transaction((txn) async {
+      await txn.delete('sms_messages', where: whereClause, whereArgs: deviceIds);
+      await txn.delete('sim_subscriptions', where: whereClause, whereArgs: deviceIds);
+      await txn.delete('raw_texts', where: whereClause, whereArgs: deviceIds);
+    });
+  }
+
+  /// Batch-insert SMS messages in a single transaction (Item 7)
+  Future<void> insertSmsBatch(List<Map<String, dynamic>> smsList) async {
+    if (smsList.isEmpty) return;
+    final db = await database;
+    await db.transaction((txn) async {
+      for (final sms in smsList) {
+        final hash = _calculateHash(sms);
+        await txn.insert(
+          'sms_messages',
+          {
+            'id': sms['id']?.toString() ?? hash,
+            'android_sms_id': sms['id'],
+            'address': sms['address'],
+            'body': sms['body'],
+            'date': sms['date'],
+            'type': sms['type'],
+            'dedup_hash': hash,
+            'device_id': sms['device_id'],
+            'device_name': sms['device_name'],
+            'created_at': DateTime.now().millisecondsSinceEpoch,
+          },
+          conflictAlgorithm: ConflictAlgorithm.ignore,
+        );
+      }
+    });
+  }
+
+  /// Batch-insert SIM subscription records in a single transaction (Item 8)
+  Future<void> insertSimBatch(List<Map<String, dynamic>> sims) async {
+    if (sims.isEmpty) return;
+    final db = await database;
+    await db.transaction((txn) async {
+      for (final sim in sims) {
+        final slot = sim['sim_slot'] ?? 0;
+        final subId = sim['subscription_id'];
+        final deviceId = sim['device_id'];
+        await txn.delete(
+          'sim_subscriptions',
+          where: '(sim_slot = ? AND (device_id IS NULL OR device_id = ?)) OR (subscription_id IS NOT NULL AND subscription_id = ?)',
+          whereArgs: [slot, deviceId, subId],
+        );
+        await txn.insert(
+          'sim_subscriptions',
+          {
+            'subscription_id': subId,
+            'phone_number': sim['phone_number'],
+            'carrier_name': sim['carrier_name'],
+            'sim_slot': slot,
+            'device_id': sim['device_id'],
+            'device_name': sim['device_name'],
+            'last_synced_at': DateTime.now().millisecondsSinceEpoch,
+          },
+        );
+      }
+    });
   }
 
   Future<void> clearAllData() async {

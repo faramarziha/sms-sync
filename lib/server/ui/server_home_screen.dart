@@ -11,6 +11,7 @@ import 'package:path/path.dart' as p;
 import '../../core/file_transfer_service.dart';
 import '../../transport/sync_transport.dart';
 import '../server_sync_service.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 // ──────────────────────────────────────────
 // Animated gradient border painter
@@ -64,6 +65,7 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   StreamSubscription<ServerState>? _stateSubscription;
   StreamSubscription<void>? _dataSubscription;
   StreamSubscription<List<DiscoveredServer>>? _discoveredClientsSubscription;
+  StreamSubscription<Map<String, String>>? _otpSubscription;
 
   final TextEditingController _textSendController = TextEditingController();
   TabController? _tabController;
@@ -108,6 +110,83 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
         });
       }
     });
+
+    _otpSubscription = widget.service.otpNotificationStream.listen((otpData) {
+      if (mounted) {
+        final otp = otpData['otp'] ?? '';
+        final sender = otpData['sender'] ?? '';
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Row(
+              children: [
+                const Icon(Icons.mark_email_read_rounded, color: Color(0xFF7EE787)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'کد پویا ($otp) از $sender در کلیپ‌بورد کپی شد!',
+                    style: GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor: const Color(0xFF161B22),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    });
+  }
+
+  void _showQrCodeDialog() {
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Row(
+            children: [
+              const Icon(Icons.qr_code_2_rounded, color: Color(0xFF58A6FF)),
+              const SizedBox(width: 10),
+              Text('QR Code جفت‌سازی', style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.bold)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: QrImageView(
+                  data: widget.service.qrPairingPayload,
+                  version: QrVersions.auto,
+                  size: 220.0,
+                  backgroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                'این کد را با دوربین برنامه اندروید اسکن کنید تا اتصال برقرار شود.',
+                textAlign: TextAlign.center,
+                style: GoogleFonts.inter(fontSize: 13, color: Colors.white70),
+              ),
+              const SizedBox(height: 8),
+              SelectableText(
+                'PIN: ${widget.service.currentPin ?? "---"}',
+                style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.bold, color: const Color(0xFF58A6FF)),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('بستن'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   @override
@@ -115,6 +194,7 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     _stateSubscription?.cancel();
     _dataSubscription?.cancel();
     _discoveredClientsSubscription?.cancel();
+    _otpSubscription?.cancel();
     _textSendController.dispose();
     _tabController?.dispose();
     _glowController.dispose();
@@ -347,6 +427,190 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  // ──────────────────────────────────────────
+  // Feature Control Bar (OTP Toggle, Clipboard, QR)
+  // ──────────────────────────────────────────
+  Widget _buildFeatureControlBar() {
+    final isOtpEnabled = widget.service.isOtpExtractionEnabled;
+    final isClipEnabled = widget.service.isClipboardSyncEnabled;
+    final otps = widget.service.otpHistory;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF161B22),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.08)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              // 1. Auto OTP Extractor Toggle Switch
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: isOtpEnabled
+                        ? const Color(0xFF7EE787).withValues(alpha: 0.1)
+                        : Colors.white.withValues(alpha: 0.03),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isOtpEnabled
+                          ? const Color(0xFF7EE787).withValues(alpha: 0.3)
+                          : Colors.white.withValues(alpha: 0.06),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.key_rounded,
+                        color: isOtpEnabled ? const Color(0xFF7EE787) : Colors.white38,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'استخراج کدهای پویا',
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: isOtpEnabled ? Colors.white : Colors.white54,
+                              ),
+                            ),
+                            Text(
+                              isOtpEnabled ? 'کپی خودکار کدهای ورود روی ویندوز' : 'غیرفعال',
+                              style: GoogleFonts.inter(fontSize: 10, color: Colors.white38),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Switch(
+                        value: isOtpEnabled,
+                        activeThumbColor: const Color(0xFF7EE787),
+                        onChanged: (val) {
+                          widget.service.setOtpExtractionEnabled(val);
+                          setState(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              // 2. Shared Clipboard Sync Toggle
+              Expanded(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: isClipEnabled
+                        ? const Color(0xFF58A6FF).withValues(alpha: 0.1)
+                        : Colors.white.withValues(alpha: 0.03),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: isClipEnabled
+                          ? const Color(0xFF58A6FF).withValues(alpha: 0.3)
+                          : Colors.white.withValues(alpha: 0.06),
+                    ),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(
+                        Icons.assignment_turned_in_rounded,
+                        color: isClipEnabled ? const Color(0xFF58A6FF) : Colors.white38,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'کلیپ‌بورد هم‌گام',
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                fontWeight: FontWeight.bold,
+                                color: isClipEnabled ? Colors.white : Colors.white54,
+                              ),
+                            ),
+                            Text(
+                              isClipEnabled ? 'همگام‌سازی دوطرفه کلیپ‌بورد' : 'غیرفعال',
+                              style: GoogleFonts.inter(fontSize: 10, color: Colors.white38),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Switch(
+                        value: isClipEnabled,
+                        activeThumbColor: const Color(0xFF58A6FF),
+                        onChanged: (val) {
+                          widget.service.setClipboardSyncEnabled(val);
+                          setState(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              // 3. QR Pairing Button
+              OutlinedButton.icon(
+                onPressed: _showQrCodeDialog,
+                icon: const Icon(Icons.qr_code_2_rounded, size: 18, color: Color(0xFFD2A8FF)),
+                label: Text('کد QR', style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFFD2A8FF))),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Color(0xFFD2A8FF)),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                ),
+              ),
+            ],
+          ),
+
+          // 4. OTP Recent History Bar (if any OTPs captured)
+          if (otps.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            const Divider(height: 1, color: Colors.white10),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                const Icon(Icons.history_toggle_off_rounded, size: 14, color: Color(0xFF7EE787)),
+                const SizedBox(width: 6),
+                Text(
+                  'آخرین کدهای پویا دریافت شده:',
+                  style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white70),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: otps.take(6).map((item) {
+                  final otp = item['otp'] ?? '';
+                  final sender = item['sender'] ?? '';
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: ActionChip(
+                      backgroundColor: const Color(0xFF21262D),
+                      avatar: const Icon(Icons.key_rounded, size: 14, color: Color(0xFF7EE787)),
+                      label: Text('$otp ($sender)', style: GoogleFonts.jetBrainsMono(fontSize: 12, color: Colors.white)),
+                      onPressed: () => _copyToClipboard(otp, 'کد پویا $otp'),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -1126,6 +1390,12 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                 ],
               ),
             ),
+          if (pin != null)
+            IconButton(
+              icon: const Icon(Icons.qr_code_2_rounded, color: Color(0xFF58A6FF)),
+              tooltip: 'Show QR Code',
+              onPressed: _showQrCodeDialog,
+            ),
           if (state == ServerState.paired || state == ServerState.connected)
             Padding(
               padding: const EdgeInsets.only(left: 12),
@@ -1212,6 +1482,7 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _buildStatusBar(),
+          _buildFeatureControlBar(),
           Expanded(
             child: TabBarView(
               controller: _tabController,

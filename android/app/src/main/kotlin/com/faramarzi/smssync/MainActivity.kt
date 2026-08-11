@@ -1,11 +1,16 @@
-package com.example.sms_sync
+package com.faramarzi.smssync
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Telephony
+import android.telephony.SmsMessage
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.webkit.MimeTypeMap
@@ -18,16 +23,58 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 class MainActivity : FlutterFragmentActivity() {
-    private val CHANNEL = "com.example.sms_sync/native_channel"
+    private val CHANNEL = "com.faramarzi.smssync/native_channel"
+    private var methodChannel: MethodChannel? = null
+    private var smsReceiver: BroadcastReceiver? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        registerSmsReceiver()
+    }
+
+    override fun onDestroy() {
+        unregisterSmsReceiver()
+        super.onDestroy()
+    }
+
+    private fun registerSmsReceiver() {
+        if (smsReceiver != null) return
+        smsReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
+                    val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
+                    for (sms in messages) {
+                        val smsData = mapOf(
+                            "address" to (sms.originatingAddress ?: "Unknown"),
+                            "body" to (sms.messageBody ?: ""),
+                            "date" to sms.timestampMillis,
+                            "id" to sms.timestampMillis
+                        )
+                        Handler(Looper.getMainLooper()).post {
+                            methodChannel?.invokeMethod("onSmsReceived", smsData)
+                        }
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
+        registerReceiver(smsReceiver, filter)
+    }
+
+    private fun unregisterSmsReceiver() {
+        smsReceiver?.let {
+            try {
+                unregisterReceiver(it)
+            } catch (_: Exception) {}
+            smsReceiver = null
+        }
     }
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        methodChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        methodChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "getSubscriptionInfo" -> {
                     val info = getSubscriptionInfo()

@@ -48,16 +48,20 @@ class FileTransferService {
     _transfersController.add(_transfers.values.toList());
   }
 
-  /// Resolve destination directory for received files
+  /// Resolve destination directory for received files.
+  ///
+  /// On Android: uses app-specific external storage (compatible with scoped
+  /// storage on Android 10+) without requiring MANAGE_EXTERNAL_STORAGE.
+  /// TODO: Consider MediaStore API for user-visible Downloads folder.
   Future<Directory> _getDownloadDirectory() async {
     Directory? dir;
     if (Platform.isAndroid) {
-      dir = Directory('/storage/emulated/0/Download/SMS_Sync');
-      if (!await dir.exists()) {
-        try {
+      // App-specific external storage works under scoped storage restrictions
+      final extDir = await getExternalStorageDirectory();
+      if (extDir != null) {
+        dir = Directory(p.join(extDir.path, 'SMS_Sync'));
+        if (!await dir.exists()) {
           await dir.create(recursive: true);
-        } catch (_) {
-          dir = await getExternalStorageDirectory();
         }
       }
     } else if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
@@ -107,7 +111,14 @@ class FileTransferService {
         },
       ));
 
-      // 2. Stream Chunks
+      // 2. Handle zero-byte files: no chunks to send
+      if (fileSize == 0) {
+        item.isCompleted = true;
+        _notifyListeners();
+        return;
+      }
+
+      // 3. Stream Chunks
       final stream = file.openRead();
       int chunkIndex = 0;
       List<int> buffer = [];
@@ -161,12 +172,31 @@ class FileTransferService {
   Future<void> handleFileHeader(Map<String, dynamic> payload) async {
     final fileId = payload['fileId'] as String;
     final rawFileName = payload['fileName'] as String;
+
+    // Sanitize: strip any directory components from the remote-supplied name
     final fileName = p.basename(rawFileName);
+
+    // Validate: reject names that could cause problems
+    if (fileName.isEmpty || fileName == '.' || fileName == '..' ||
+        fileName.contains('/') || fileName.contains('\\')) {
+      debugPrint('Rejected invalid file name after sanitization: "$rawFileName" -> "$fileName"');
+      return;
+    }
+
     final fileSize = payload['fileSize'] as int;
     final sender = payload['sender'] as String? ?? 'Remote Device';
 
     final saveDir = await _getDownloadDirectory();
     final targetPath = p.join(saveDir.path, fileName);
+
+    // Defense-in-depth: verify the resolved path is still inside the save dir
+    final canonicalTarget = p.canonicalize(targetPath);
+    final canonicalSaveDir = p.canonicalize(saveDir.path);
+    if (!canonicalTarget.startsWith(canonicalSaveDir)) {
+      debugPrint('Path traversal blocked: "$targetPath" escapes "$canonicalSaveDir"');
+      return;
+    }
+
     final targetFile = File(targetPath);
 
     if (await targetFile.exists()) {
@@ -186,6 +216,15 @@ class FileTransferService {
     );
 
     _transfers[fileId] = item;
+
+    // Handle zero-byte files immediately (Item 11)
+    if (fileSize == 0) {
+      await sink.flush();
+      await sink.close();
+      _incomingFileSinks.remove(fileId);
+      item.isCompleted = true;
+    }
+
     _notifyListeners();
   }
 

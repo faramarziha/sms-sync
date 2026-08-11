@@ -5,10 +5,14 @@ enum SyncMessageType {
   pairRequest,
   pairVerify,
   contactInfo,
+  contactInfoBatch,
   sms,
+  smsBatch,
   rawText,
   fileHeader,
   fileChunk,
+  clipboardSync,
+  otpCode,
   ack,
 }
 
@@ -42,11 +46,17 @@ class SyncMessage {
   }
 
   factory SyncMessage.fromJson(Map<String, dynamic> json) {
+    SyncMessageType type;
+    try {
+      type = SyncMessageType.values.byName(json['type']);
+    } on ArgumentError {
+      type = SyncMessageType.ack; // Fallback for unknown types
+    }
     return SyncMessage(
       id: json['id'],
-      type: SyncMessageType.values.byName(json['type']),
+      type: type,
       timestamp: json['timestamp'],
-      payload: json['payload'],
+      payload: Map<String, dynamic>.from(json['payload'] ?? {}),
     );
   }
 
@@ -55,3 +65,4 @@ class SyncMessage {
   factory SyncMessage.decode(String raw) =>
       SyncMessage.fromJson(jsonDecode(raw));
 }
+

@@ -1,18 +1,23 @@
 import 'dart:math';
 
+/// Handles PIN generation, verification, and brute-force lockout.
+///
+/// **Security note**: This service does NOT track which devices are paired.
+/// Per-device pairing state is managed by the caller (e.g. ServerSyncService)
+/// via a `Set<String> _pairedDeviceIds`. This prevents a global boolean from
+/// granting access to all connected devices after a single successful pairing.
 class PairingService {
   String? _currentPin;
-  bool _isPaired = false;
   int _failedAttempts = 0;
   DateTime? _lockoutUntil;
 
-  bool get isPaired => _isPaired;
   String? get currentPin => _currentPin;
+  int get failedAttempts => _failedAttempts;
+  DateTime? get lockoutUntil => _lockoutUntil;
 
   String generatePin() {
     final random = Random();
     _currentPin = (random.nextInt(9000) + 1000).toString();
-    _isPaired = false;
     _failedAttempts = 0;
     _lockoutUntil = null;
     return _currentPin!;
@@ -24,7 +29,6 @@ class PairingService {
     }
 
     if (_currentPin != null && pin == _currentPin) {
-      _isPaired = true;
       _failedAttempts = 0;
       _lockoutUntil = null;
       return true;
@@ -39,7 +43,6 @@ class PairingService {
 
   void reset() {
     _currentPin = null;
-    _isPaired = false;
     _failedAttempts = 0;
     _lockoutUntil = null;
   }

@@ -1,14 +1,13 @@
-name: Build Windows App
+name: Build Apps (Windows & Android)
 
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch: # امکان اجرای دستی بیلد از داخل سایت گیت‌هاب
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
-
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -30,3 +29,34 @@ jobs:
         with:
           name: windows-release-app
           path: build/windows/x64/runner/Release/
+
+  build-android:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Install Dependencies
+        run: flutter pub get
+
+      - name: Build Android APK
+        run: flutter build apk --release
+
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk

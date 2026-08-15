@@ -101,14 +101,24 @@ class DatabaseService {
     return sha256.convert(utf8.encode(sb.toString())).toString();
   }
 
+  String _uniqueSmsId(Map<String, dynamic> sms, String hash) {
+    final devId = sms['device_id']?.toString() ?? '';
+    final rawId = sms['id']?.toString();
+    if (rawId != null && rawId.isNotEmpty && devId.isNotEmpty) {
+      return '${devId}_$rawId';
+    }
+    return rawId ?? hash;
+  }
+
   Future<void> insertOrUpdateSms(Map<String, dynamic> sms) async {
     final db = await database;
     final hash = _calculateHash(sms);
+    final id = _uniqueSmsId(sms, hash);
     
     await db.insert(
       'sms_messages',
       {
-        'id': sms['id']?.toString() ?? hash,
+        'id': id,
         'android_sms_id': sms['id'],
         'address': sms['address'],
         'body': sms['body'],
@@ -217,10 +227,11 @@ class DatabaseService {
     await db.transaction((txn) async {
       for (final sms in smsList) {
         final hash = _calculateHash(sms);
+        final id = _uniqueSmsId(sms, hash);
         await txn.insert(
           'sms_messages',
           {
-            'id': sms['id']?.toString() ?? hash,
+            'id': id,
             'android_sms_id': sms['id'],
             'address': sms['address'],
             'body': sms['body'],

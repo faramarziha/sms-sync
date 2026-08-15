@@ -40,7 +40,7 @@ class OtpExtractor {
 
     // Rule 1: "code: 12345" or "Code: 72345" or "code 1234"
     final codeColonMatch = RegExp(
-      r'(?:code|Code|CODE)\s*[:\-=]?\s*(\d{4,8})',
+      r'(?:code|Code|CODE)\s*[:\-=]?\s*(?<!\d)(\d{4,8})(?!\d)',
       caseSensitive: false,
     ).firstMatch(normalized);
 
@@ -49,7 +49,7 @@ class OtpExtractor {
     }
 
     // Rule 2: WebOTP format e.g. "@domain #12345" or "#123456"
-    final webOtpMatch = RegExp(r'#(\d{4,8})').firstMatch(normalized);
+    final webOtpMatch = RegExp(r'#(?<!\d)(\d{4,8})(?!\d)').firstMatch(normalized);
     if (webOtpMatch != null) {
       return webOtpMatch.group(1);
     }
@@ -58,7 +58,7 @@ class OtpExtractor {
     // e.g. "کد ورود: 1234", "رمز پویا: 987654", "کد اختصاصی شما برای ورود 12345"
     // Skip numbers adjacent to asterisks (like card number 6037********1234)
     final persianPhraseMatches = RegExp(
-      r'(?:کد\s*ورود|کد\s*تایید|کد\s*پویا|کد\s*اختصاصی|کد\s*فعالسازی|رمز\s*پویا|رمز\s*ورود|رمز|کد)\D*?(\d{4,8})',
+      r'(?:کد\s*ورود|کد\s*تایید|کد\s*پویا|کد\s*اختصاصی|کد\s*فعالسازی|رمز\s*پویا|رمز\s*ورود|رمز|کد)\D*?(?<!\d)(\d{4,8})(?!\d)',
       caseSensitive: false,
     ).allMatches(normalized);
 
@@ -69,7 +69,8 @@ class OtpExtractor {
         final startPos = match.start + match.group(0)!.indexOf(code);
         final endPos = startPos + code.length;
         final isFollowedByAsterisk = endPos < normalized.length && (normalized[endPos] == '*' || normalized[endPos] == 'x');
-        if (!isFollowedByAsterisk) {
+        final isPrecededByAsterisk = startPos > 0 && (normalized[startPos - 1] == '*' || normalized[startPos - 1] == 'x');
+        if (!isFollowedByAsterisk && !isPrecededByAsterisk) {
           return code;
         }
       }
@@ -77,7 +78,7 @@ class OtpExtractor {
 
     // Rule 4: If text contains OTP keywords, look for standalone 4-8 digit numbers not attached to asterisks
     if (isOtpMessage(normalized)) {
-      final standaloneMatches = RegExp(r'\b(\d{4,8})\b').allMatches(normalized);
+      final standaloneMatches = RegExp(r'(?<!\d)(\d{4,8})(?!\d)').allMatches(normalized);
       for (final match in standaloneMatches) {
         final code = match.group(1)!;
         final startPos = match.start;

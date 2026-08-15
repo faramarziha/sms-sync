@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import '../core/models/sync_message.dart';
@@ -111,12 +112,15 @@ class WebSocketTransport implements SyncTransport {
     socket.listen(
       (data) {
         if (data is String) {
-          if (data.contains('"ping"')) {
-            return;
-          }
           try {
-            final message = SyncMessage.decode(data);
-            _messageController.add(message);
+            final decoded = jsonDecode(data);
+            if (decoded is Map<String, dynamic>) {
+              if (decoded['type'] == 'ping') {
+                return;
+              }
+              final message = SyncMessage.fromJson(decoded);
+              _messageController.add(message);
+            }
           } catch (e) {
             debugPrint("Error decoding message: $e");
           }

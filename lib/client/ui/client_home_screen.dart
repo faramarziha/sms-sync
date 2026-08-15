@@ -103,7 +103,7 @@ class ClientHomeScreen extends StatefulWidget {
   State<ClientHomeScreen> createState() => _ClientHomeScreenState();
 }
 
-class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProviderStateMixin {
+class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProviderStateMixin, WidgetsBindingObserver {
   List<DiscoveredServer> _servers = [];
   final TextEditingController _pinController = TextEditingController();
   final TextEditingController _ipController = TextEditingController(text: '192.168.1.');
@@ -115,6 +115,8 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
   StreamSubscription<Map<String, dynamic>>? _textSubscription;
 
   bool _isPairingDialogShowing = false;
+  bool _isAutoPairing = false;
+  bool _isBatteryOptimized = false;
   SyncScope _selectedScope = SyncScope.both;
   final List<Map<String, dynamic>> _textHistory = [];
 
@@ -126,6 +128,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 3, vsync: this);
 
     _radarController = AnimationController(
@@ -140,6 +143,8 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     _fadeAnimation = CurvedAnimation(parent: _fadeController, curve: Curves.easeOut);
     _fadeController.forward();
 
+    _checkBatteryOptimization();
+
     _discoverySubscription = widget.service.discovery.discoveredServers.listen((servers) {
       if (mounted) {
         setState(() => _servers = servers);
@@ -148,8 +153,11 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
 
     _stateSubscription = widget.service.stateStream.listen((state) {
       if (mounted) setState(() {});
-      if (state == ClientState.pairing && !_isPairingDialogShowing) {
+      if (state == ClientState.pairing && !_isPairingDialogShowing && !_isAutoPairing) {
         _showPairingDialog();
+      }
+      if (state != ClientState.pairing && state != ClientState.connecting) {
+        _isAutoPairing = false;
       }
     });
 
@@ -163,7 +171,37 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      // Pause battery-draining clipboard polling in background
+      widget.service.pauseClipboardMonitoring();
+    } else if (state == AppLifecycleState.resumed) {
+      // Resume clipboard polling when returning to foreground
+      widget.service.resumeClipboardMonitoring();
+      _checkBatteryOptimization();
+    }
+  }
+
+  Future<void> _checkBatteryOptimization() async {
+    if (Platform.isAndroid) {
+      final isIgnoring = await widget.service.nativeBridge.isIgnoringBatteryOptimizations();
+      if (mounted) {
+        setState(() {
+          _isBatteryOptimized = !isIgnoring;
+        });
+      }
+    }
+  }
+
+  Future<void> _requestBatteryWhitelist() async {
+    await widget.service.nativeBridge.requestIgnoreBatteryOptimizations();
+    await Future.delayed(const Duration(seconds: 1));
+    await _checkBatteryOptimization();
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _discoverySubscription?.cancel();
     _stateSubscription?.cancel();
     _textSubscription?.cancel();
@@ -423,6 +461,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                             final pin = data['pin'] as String?;
 
                             if (address != null && pin != null) {
+                              _isAutoPairing = true;
                               Navigator.pop(context);
                               await widget.service.connectToServer(
                                 DiscoveredServer(name: 'Scanned PC', address: address, port: port),
@@ -559,6 +598,60 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     );
   }
 
+  Widget _buildBatteryOptimizationBanner() {
+    if (!_isBatteryOptimized || !Platform.isAndroid) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF0883E).withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFF0883E).withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0883E).withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(Icons.battery_saver_rounded, color: Color(0xFFF0883E), size: 22),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'بهینه‌سازی باتری فعال است',
+                  style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.bold, color: const Color(0xFFF0883E)),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'جهت جلوگیری از قطع اتصال در پس‌زمینه، محدودیت باتری را غیرفعال کنید.',
+                  style: GoogleFonts.inter(fontSize: 11, color: Colors.white70),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFF0883E),
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              textStyle: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.bold),
+            ),
+            onPressed: _requestBatteryWhitelist,
+            child: const Text('رفع محدودیت'),
+          ),
+        ],
+      ),
+    );
+  }
+
   // ──────────────────────────────────────────
   // SMS Synced Tab
   // ──────────────────────────────────────────
@@ -566,63 +659,95 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     return Center(
       child: FadeTransition(
         opacity: _fadeAnimation,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(20),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF238636), Color(0xFF7EE787)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                boxShadow: [
-                  BoxShadow(color: const Color(0xFF7EE787).withValues(alpha: 0.2), blurRadius: 30, spreadRadius: 5),
-                ],
-              ),
-              child: const Icon(Icons.check_rounded, size: 48, color: Colors.white),
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'SMS & SIM Auto-Sync Active',
-              style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Messages and SIM cards are syncing to your PC',
-              style: GoogleFonts.inter(color: Colors.white38, fontSize: 14),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 24),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
-              decoration: BoxDecoration(
-                color: const Color(0xFF7EE787).withValues(alpha: 0.08),
-                borderRadius: BorderRadius.circular(24),
-                border: Border.all(color: const Color(0xFF7EE787).withValues(alpha: 0.2)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Container(
-                    width: 6,
-                    height: 6,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Color(0xFF7EE787),
+        child: SingleChildScrollView(
+          child: Padding(
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                _buildBatteryOptimizationBanner(),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    gradient: const LinearGradient(
+                      colors: [Color(0xFF238636), Color(0xFF7EE787)],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
                     ),
+                    boxShadow: [
+                      BoxShadow(color: const Color(0xFF7EE787).withValues(alpha: 0.2), blurRadius: 30, spreadRadius: 5),
+                    ],
                   ),
-                  const SizedBox(width: 8),
-                  Text(
-                    'Background Sync Active',
-                    style: GoogleFonts.inter(color: const Color(0xFF7EE787), fontWeight: FontWeight.w600, fontSize: 12),
-                  ),
-                ],
-              ),
+                  child: const Icon(Icons.check_rounded, size: 48, color: Colors.white),
+                ),
+                const SizedBox(height: 24),
+                Text(
+                  'SMS & SIM Auto-Sync Active',
+                  style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'پیامک‌های جدید بدون تاخیر و به صورت لحظه‌ای به کامپیوتر ارسال می‌شوند',
+                  style: GoogleFonts.inter(color: Colors.white60, fontSize: 13),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 20),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF7EE787).withValues(alpha: 0.08),
+                        borderRadius: BorderRadius.circular(20),
+                        border: Border.all(color: const Color(0xFF7EE787).withValues(alpha: 0.2)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 6,
+                            height: 6,
+                            decoration: const BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: Color(0xFF7EE787),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            'سینک لحظه‌ای و کم‌مصرف',
+                            style: GoogleFonts.inter(color: const Color(0xFF7EE787), fontWeight: FontWeight.w600, fontSize: 12),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    OutlinedButton.icon(
+                      onPressed: () async {
+                        await widget.service.manualRefreshSync();
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('همگام‌سازی پیامک‌ها و سیم‌کارت انجام شد'),
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.sync_rounded, size: 14, color: Color(0xFF58A6FF)),
+                      label: Text('همگام‌سازی دستی', style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF58A6FF))),
+                      style: OutlinedButton.styleFrom(
+                        side: BorderSide(color: const Color(0xFF58A6FF).withValues(alpha: 0.3)),
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -916,6 +1041,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
   Widget _buildScanningView() {
     return Column(
       children: [
+        _buildBatteryOptimizationBanner(),
         Expanded(
           child: Center(
             child: Column(

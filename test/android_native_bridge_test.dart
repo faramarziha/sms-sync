@@ -200,32 +200,59 @@ void main() {
     });
   });
 
-  group('stopForegroundService', () {
-    test('does not throw on PlatformException', () async {
+  group('isIgnoringBatteryOptimizations', () {
+    test('returns true when battery optimization is ignored', () async {
       TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
           .setMockMethodCallHandler(channel, (MethodCall call) async {
-        if (call.method == 'stopForegroundService') {
-          throw PlatformException(
-            code: 'SERVICE_ERROR',
-            message: 'Failed to stop service',
-          );
-        }
-        return null;
-      });
-
-      await expectLater(bridge.stopForegroundService(), completes);
-    });
-
-    test('completes successfully on success', () async {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, (MethodCall call) async {
-        if (call.method == 'stopForegroundService') {
+        if (call.method == 'isIgnoringBatteryOptimizations') {
           return true;
         }
         return null;
       });
 
-      await expectLater(bridge.stopForegroundService(), completes);
+      final result = await bridge.isIgnoringBatteryOptimizations();
+      expect(result, isTrue);
+    });
+
+    test('returns false on PlatformException', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+        if (call.method == 'isIgnoringBatteryOptimizations') {
+          throw PlatformException(code: 'ERROR', message: 'Failed');
+        }
+        return null;
+      });
+
+      final result = await bridge.isIgnoringBatteryOptimizations();
+      expect(result, isFalse);
+    });
+  });
+
+  group('requestIgnoreBatteryOptimizations', () {
+    test('returns true on success', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+        if (call.method == 'requestIgnoreBatteryOptimizations') {
+          return true;
+        }
+        return null;
+      });
+
+      final result = await bridge.requestIgnoreBatteryOptimizations();
+      expect(result, isTrue);
+    });
+
+    test('returns false on PlatformException', () async {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, (MethodCall call) async {
+        if (call.method == 'requestIgnoreBatteryOptimizations') {
+          throw PlatformException(code: 'ERROR', message: 'Failed');
+        }
+        return null;
+      });
+
+      final result = await bridge.requestIgnoreBatteryOptimizations();
+      expect(result, isFalse);
     });
   });
 }

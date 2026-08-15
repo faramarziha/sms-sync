@@ -183,11 +183,24 @@ class FileTransferService {
       return;
     }
 
-    final fileSize = payload['fileSize'] as int;
+    final fileSize = (payload['fileSize'] as num?)?.toInt() ?? 0;
     final sender = payload['sender'] as String? ?? 'Remote Device';
 
     final saveDir = await _getDownloadDirectory();
-    final targetPath = p.join(saveDir.path, fileName);
+    var resolvedFileName = fileName;
+    var targetPath = p.join(saveDir.path, resolvedFileName);
+
+    // If file already exists, generate a unique name without deleting existing files
+    if (await File(targetPath).exists()) {
+      final nameWithoutExt = p.basenameWithoutExtension(fileName);
+      final ext = p.extension(fileName);
+      int counter = 1;
+      while (await File(p.join(saveDir.path, '$nameWithoutExt ($counter)$ext')).exists()) {
+        counter++;
+      }
+      resolvedFileName = '$nameWithoutExt ($counter)$ext';
+      targetPath = p.join(saveDir.path, resolvedFileName);
+    }
 
     // Defense-in-depth: verify the resolved path is still inside the save dir
     final canonicalTarget = p.canonicalize(targetPath);
@@ -198,17 +211,12 @@ class FileTransferService {
     }
 
     final targetFile = File(targetPath);
-
-    if (await targetFile.exists()) {
-      await targetFile.delete();
-    }
-
     final sink = targetFile.openWrite();
     _incomingFileSinks[fileId] = sink;
 
     final item = FileTransferItem(
       fileId: fileId,
-      fileName: fileName,
+      fileName: resolvedFileName,
       fileSize: fileSize,
       sender: sender,
       isOutgoing: false,
@@ -230,9 +238,17 @@ class FileTransferService {
 
   /// Handle incoming file chunk
   Future<void> handleFileChunk(Map<String, dynamic> payload) async {
-    final fileId = payload['fileId'] as String;
-    final base64Data = payload['base64Data'] as String;
-    final bytes = base64Decode(base64Data);
+    final fileId = payload['fileId'] as String?;
+    final base64Data = payload['base64Data'] as String?;
+    if (fileId == null || base64Data == null) return;
+
+    List<int> bytes;
+    try {
+      bytes = base64Decode(base64Data);
+    } catch (e) {
+      debugPrint("Error decoding file chunk base64: $e");
+      return;
+    }
 
     final sink = _incomingFileSinks[fileId];
     final item = _transfers[fileId];

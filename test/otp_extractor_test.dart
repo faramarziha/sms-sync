@@ -66,6 +66,16 @@ code: 12103
       expect(OtpExtractor.extractOtp(sms), isNull);
     });
 
+    test('Tracking code with 12 digits is not mistakenly extracted as OTP', () {
+      const sms = 'سفارش شما با کد پیگیری 123456789012 ثبت گردید.';
+      expect(OtpExtractor.extractOtp(sms), isNull);
+    });
+
+    test('OTP extracted correctly in message containing longer numbers', () {
+      const sms = 'کد پیگیری 123456789012 - رمز ورود شما: 45892';
+      expect(OtpExtractor.extractOtp(sms), '45892');
+    });
+
     test('Empty text returns null', () {
       expect(OtpExtractor.extractOtp(''), isNull);
     });

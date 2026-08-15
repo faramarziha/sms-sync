@@ -160,7 +160,7 @@ class Initializer extends StatefulWidget {
 }
 
 class _InitializerState extends State<Initializer> {
-  late dynamic _service;
+  dynamic _service;
   bool _isServer = false;
 
   @override
@@ -172,7 +172,7 @@ class _InitializerState extends State<Initializer> {
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       _isServer = true;
       _service = ServerSyncService(transport, discovery);
-    } else if (Platform.isAndroid || Platform.isIOS) {
+    } else {
       _isServer = false;
       _service = ClientSyncService(transport, discovery);
     }
@@ -181,17 +181,22 @@ class _InitializerState extends State<Initializer> {
   @override
   void dispose() {
     if (_service != null) {
-      (_service as dynamic).dispose();
+      try {
+        (_service as dynamic).dispose();
+      } catch (_) {}
     }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isServer) {
+    if (_isServer && _service is ServerSyncService) {
       return ServerHomeScreen(service: _service as ServerSyncService);
-    } else {
+    } else if (_service is ClientSyncService) {
       return ClientHomeScreen(service: _service as ClientSyncService);
     }
+    return const Scaffold(
+      body: Center(child: CircularProgressIndicator()),
+    );
   }
 }

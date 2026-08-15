@@ -170,6 +170,21 @@ void main() {
       final decoded = SyncMessage.decode(msg.encode());
       expect(decoded.payload['text'], msg.payload['text']);
     });
+
+    test('SMS containing "ping" text preserves content and decodes as SyncMessage', () {
+      final msg = SyncMessage(
+        type: SyncMessageType.sms,
+        payload: {
+          'address': '+989123456789',
+          'body': 'Please ping me at 4 PM: "ping 1234"',
+        },
+      );
+
+      final encoded = msg.encode();
+      final decoded = SyncMessage.decode(encoded);
+      expect(decoded.type, SyncMessageType.sms);
+      expect(decoded.payload['body'], contains('ping'));
+    });
   });
 
   group('SyncScope enum', () {

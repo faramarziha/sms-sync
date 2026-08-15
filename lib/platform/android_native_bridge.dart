@@ -66,4 +66,24 @@ class AndroidNativeBridge {
       debugPrint("Failed to stop foreground service: '${e.message}'.");
     }
   }
+
+  Future<bool> isIgnoringBatteryOptimizations() async {
+    try {
+      final bool? result = await _channel.invokeMethod('isIgnoringBatteryOptimizations');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      debugPrint("Failed to check battery optimization status: '${e.message}'.");
+      return false;
+    }
+  }
+
+  Future<bool> requestIgnoreBatteryOptimizations() async {
+    try {
+      final bool? result = await _channel.invokeMethod('requestIgnoreBatteryOptimizations');
+      return result ?? false;
+    } on PlatformException catch (e) {
+      debugPrint("Failed to request battery optimization whitelist: '${e.message}'.");
+      return false;
+    }
+  }
 }

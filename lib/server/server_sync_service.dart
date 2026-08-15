@@ -288,9 +288,12 @@ class ServerSyncService {
 
       case SyncMessageType.clipboardSync:
         if (_pairedDeviceIds.contains(devId) && isClipboardSyncEnabled) {
-          final text = message.payload['text'] as String?;
-          if (text != null && text.isNotEmpty) {
-            await clipboardService.setText(text);
+          final clientScope = _connectedDevices[devId]?.scope ?? _clientScope;
+          if (clientScope == SyncScope.both || clientScope == SyncScope.textFiles) {
+            final text = message.payload['text'] as String?;
+            if (text != null && text.isNotEmpty) {
+              await clipboardService.setText(text);
+            }
           }
         }
         break;

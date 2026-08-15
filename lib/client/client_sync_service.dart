@@ -50,6 +50,11 @@ class ClientSyncService {
   }
 
   Timer? _periodicSyncTimer;
+  Timer? _autoReconnectTimer;
+  DiscoveredServer? _lastConnectedServer;
+  String? _lastPin;
+  bool _isManualDisconnect = false;
+  int _reconnectAttempts = 0;
 
   final _stateController = StreamController<ClientState>.broadcast();
   Stream<ClientState> get stateStream => _stateController.stream;
@@ -72,15 +77,23 @@ class ClientSyncService {
     });
 
     transport.connectionStatus.listen((connected) {
-      if (!connected && (_state == ClientState.synced || _state == ClientState.syncing || _state == ClientState.pairing)) {
+      if (connected) {
+        _reconnectAttempts = 0;
+        _stopAutoReconnectTimer();
+      } else {
         _stopPeriodicSync();
         clipboardService.stopMonitoring();
-        _stopForegroundService();
-        _updateState(ClientState.idle);
+        if (!_isManualDisconnect && _lastConnectedServer != null && _lastPin != null) {
+          debugPrint('Connection lost unexpectedly. Scheduling auto-reconnect...');
+          _scheduleAutoReconnect();
+        } else {
+          _stopForegroundService();
+          _updateState(ClientState.idle);
+        }
       }
     });
 
-    // Listen to real-time incoming SMS events from Android BroadcastReceiver
+    // Listen to real-time incoming SMS events from Android BroadcastReceiver with zero delay
     nativeBridge.onSmsReceivedStream.listen((sms) {
       _handleIncomingSms(sms);
     });
@@ -90,7 +103,7 @@ class ClientSyncService {
     final body = sms['body'] as String? ?? '';
     final address = sms['address'] as String? ?? 'SMS';
 
-    // Send single incoming SMS to server
+    // Send single incoming SMS to server immediately
     final smsPayload = Map<String, dynamic>.from(sms);
     smsPayload['device_id'] = deviceId;
     smsPayload['device_name'] = deviceName;
@@ -99,7 +112,9 @@ class ClientSyncService {
         type: SyncMessageType.sms,
         payload: smsPayload,
       ));
-    } catch (_) {}
+    } catch (e) {
+      debugPrint("Failed to send real-time SMS: $e");
+    }
 
     // Extract OTP from real-time incoming SMS
     final otp = OtpExtractor.extractOtp(body);
@@ -128,6 +143,7 @@ class ClientSyncService {
   }
 
   Future<void> startDiscovery() async {
+    _isManualDisconnect = false;
     _updateState(ClientState.browsing);
     try {
       await transport.startServer(8081);
@@ -143,6 +159,8 @@ class ClientSyncService {
   }
 
   Future<void> connectToServer(DiscoveredServer server) async {
+    _isManualDisconnect = false;
+    _lastConnectedServer = server;
     _updateState(ClientState.connecting);
     try {
       await transport.connect(server.address, server.port);
@@ -150,11 +168,15 @@ class ClientSyncService {
     } catch (e) {
       debugPrint('Connection to server failed: $e');
       _updateState(ClientState.error);
+      if (!_isManualDisconnect && _lastConnectedServer != null && _lastPin != null) {
+        _scheduleAutoReconnect();
+      }
     }
   }
 
   Future<void> sendPairRequest(String pin, {SyncScope scope = SyncScope.both}) async {
     _scope = scope;
+    _lastPin = pin;
     // Persist scope selection
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -177,9 +199,12 @@ class ClientSyncService {
     switch (message.type) {
       case SyncMessageType.pairVerify:
         if (message.payload['status'] == 'success') {
+          _reconnectAttempts = 0;
           _updateState(ClientState.syncing);
           _startForegroundService();
           await _runSync();
+        } else {
+          _updateState(ClientState.error);
         }
         break;
       case SyncMessageType.rawText:
@@ -192,9 +217,11 @@ class ClientSyncService {
         await fileTransfer.handleFileChunk(message.payload);
         break;
       case SyncMessageType.clipboardSync:
-        final text = message.payload['text'] as String?;
-        if (text != null && text.isNotEmpty) {
-          await clipboardService.setText(text);
+        if (_scope == SyncScope.both || _scope == SyncScope.textFiles) {
+          final text = message.payload['text'] as String?;
+          if (text != null && text.isNotEmpty) {
+            await clipboardService.setText(text);
+          }
         }
         break;
       default:
@@ -212,6 +239,33 @@ class ClientSyncService {
     if (Platform.isAndroid) {
       nativeBridge.stopForegroundService();
     }
+  }
+
+  void _scheduleAutoReconnect() {
+    _stopAutoReconnectTimer();
+    if (_isManualDisconnect || _lastConnectedServer == null || _lastPin == null) return;
+
+    _reconnectAttempts++;
+    // Exponential backoff: 2s, 4s, 8s, up to max 30s
+    final delaySeconds = (_reconnectAttempts <= 1) ? 2 : (_reconnectAttempts * 3).clamp(2, 30);
+    debugPrint('Scheduling auto-reconnect attempt #$_reconnectAttempts in $delaySeconds seconds...');
+
+    _autoReconnectTimer = Timer(Duration(seconds: delaySeconds), () async {
+      if (_isManualDisconnect || _lastConnectedServer == null || _lastPin == null) return;
+      debugPrint('Executing auto-reconnect to ${_lastConnectedServer!.address}:${_lastConnectedServer!.port}...');
+      try {
+        await transport.connect(_lastConnectedServer!.address, _lastConnectedServer!.port);
+        await sendPairRequest(_lastPin!, scope: _scope);
+      } catch (e) {
+        debugPrint('Auto-reconnect attempt failed: $e');
+        _scheduleAutoReconnect();
+      }
+    });
+  }
+
+  void _stopAutoReconnectTimer() {
+    _autoReconnectTimer?.cancel();
+    _autoReconnectTimer = null;
   }
 
   Future<void> sendRawText(String text) async {
@@ -238,13 +292,18 @@ class ClientSyncService {
     );
   }
 
+  /// Initial sync of subscriptions & recent SMS. Event-driven BroadcastReceiver handles all subsequent SMS.
   Future<void> _runSync() async {
     try {
       if (_scope == SyncScope.smsSim || _scope == SyncScope.both) {
-        if (await Permission.sms.request().isGranted &&
-            await Permission.phone.request().isGranted) {
-          // Also request notification permission on Android 13+
-          if (Platform.isAndroid) {
+        bool smsGranted = await Permission.sms.isGranted;
+        bool phoneGranted = await Permission.phone.isGranted;
+        if (!smsGranted) smsGranted = (await Permission.sms.request()).isGranted;
+        if (!phoneGranted) phoneGranted = (await Permission.phone.request()).isGranted;
+
+        if (smsGranted && phoneGranted) {
+          // Also request notification permission on Android 13+ if not granted
+          if (Platform.isAndroid && !(await Permission.notification.isGranted)) {
             await Permission.notification.request();
           }
 
@@ -294,11 +353,20 @@ class ClientSyncService {
     }
   }
 
+  /// Manual refresh sync on-demand (e.g. pull-to-refresh)
+  Future<void> manualRefreshSync() async {
+    if (_state == ClientState.synced) {
+      await _runSync();
+    }
+  }
+
+  /// Ultra-low battery background sync: 5-minute lightweight heartbeat check
   void _startPeriodicSync() {
     _stopPeriodicSync();
     if (_scope == SyncScope.textFiles) return;
 
-    _periodicSyncTimer = Timer.periodic(const Duration(seconds: 15), (_) {
+    // 5-minute long interval heartbeat to avoid continuous battery drain
+    _periodicSyncTimer = Timer.periodic(const Duration(minutes: 5), (_) {
       if (_state == ClientState.synced) {
         _runSync();
       }
@@ -311,8 +379,9 @@ class ClientSyncService {
   }
 
   void _startClipboardSync() {
+    if (_scope == SyncScope.smsSim) return;
     clipboardService.startMonitoring((newText) {
-      if (_state == ClientState.synced) {
+      if (_state == ClientState.synced && (_scope == SyncScope.both || _scope == SyncScope.textFiles)) {
         transport.send(SyncMessage(
           type: SyncMessageType.clipboardSync,
           payload: {
@@ -325,7 +394,19 @@ class ClientSyncService {
     });
   }
 
+  void pauseClipboardMonitoring() {
+    clipboardService.stopMonitoring();
+  }
+
+  void resumeClipboardMonitoring() {
+    if (_state == ClientState.synced) {
+      _startClipboardSync();
+    }
+  }
+
   Future<void> disconnect() async {
+    _isManualDisconnect = true;
+    _stopAutoReconnectTimer();
     _stopPeriodicSync();
     _stopForegroundService();
     clipboardService.stopMonitoring();
@@ -334,6 +415,8 @@ class ClientSyncService {
   }
 
   Future<void> dispose() async {
+    _isManualDisconnect = true;
+    _stopAutoReconnectTimer();
     _stopPeriodicSync();
     _stopForegroundService();
     clipboardService.dispose();

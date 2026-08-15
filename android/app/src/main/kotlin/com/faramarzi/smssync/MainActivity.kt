@@ -16,6 +16,7 @@ import android.telephony.TelephonyManager
 import android.webkit.MimeTypeMap
 import androidx.activity.enableEdgeToEdge
 import androidx.annotation.NonNull
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -43,23 +44,45 @@ class MainActivity : FlutterFragmentActivity() {
         smsReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == Telephony.Sms.Intents.SMS_RECEIVED_ACTION) {
+                    // Acquire instant 5s temporary WakeLock to guarantee CPU stays awake during transmission
+                    try {
+                        val powerManager = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                        val wakeLock = powerManager?.newWakeLock(android.os.PowerManager.PARTIAL_WAKE_LOCK, "SMS_Sync::IncomingSmsWakeLock")
+                        wakeLock?.acquire(5000L)
+                    } catch (_: Exception) {}
+
                     val messages = Telephony.Sms.Intents.getMessagesFromIntent(intent)
-                    for (sms in messages) {
-                        val smsData = mapOf(
-                            "address" to (sms.originatingAddress ?: "Unknown"),
-                            "body" to (sms.messageBody ?: ""),
-                            "date" to sms.timestampMillis,
-                            "id" to sms.timestampMillis
-                        )
-                        Handler(Looper.getMainLooper()).post {
-                            methodChannel?.invokeMethod("onSmsReceived", smsData)
+                    if (messages != null && messages.isNotEmpty()) {
+                        val grouped = messages.groupBy { it.originatingAddress ?: "Unknown" }
+                        for ((address, partList) in grouped) {
+                            val fullBody = StringBuilder()
+                            var latestTimestamp = 0L
+                            for (part in partList) {
+                                fullBody.append(part.displayMessageBody ?: part.messageBody ?: "")
+                                if (part.timestampMillis > latestTimestamp) {
+                                    latestTimestamp = part.timestampMillis
+                                }
+                            }
+                            val smsData = mapOf(
+                                "address" to address,
+                                "body" to fullBody.toString(),
+                                "date" to latestTimestamp,
+                                "id" to latestTimestamp
+                            )
+                            Handler(Looper.getMainLooper()).post {
+                                methodChannel?.invokeMethod("onSmsReceived", smsData)
+                            }
                         }
                     }
                 }
             }
         }
         val filter = IntentFilter(Telephony.Sms.Intents.SMS_RECEIVED_ACTION)
-        registerReceiver(smsReceiver, filter)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            ContextCompat.registerReceiver(this, smsReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        } else {
+            registerReceiver(smsReceiver, filter)
+        }
     }
 
     private fun unregisterSmsReceiver() {
@@ -102,6 +125,36 @@ class MainActivity : FlutterFragmentActivity() {
                     stopForegroundSyncService()
                     result.success(true)
                 }
+                "isIgnoringBatteryOptimizations" -> {
+                    val powerManager = getSystemService(Context.POWER_SERVICE) as? android.os.PowerManager
+                    val isIgnoring = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        powerManager?.isIgnoringBatteryOptimizations(packageName) ?: false
+                    } else {
+                        true
+                    }
+                    result.success(isIgnoring)
+                }
+                "requestIgnoreBatteryOptimizations" -> {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        try {
+                            val intent = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                                data = Uri.parse("package:$packageName")
+                            }
+                            startActivity(intent)
+                            result.success(true)
+                        } catch (e: Exception) {
+                            try {
+                                val intent = Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                                startActivity(intent)
+                                result.success(true)
+                            } catch (e2: Exception) {
+                                result.success(false)
+                            }
+                        }
+                    } else {
+                        result.success(true)
+                    }
+                }
                 else -> {
                     result.notImplemented()
                 }
@@ -129,8 +182,12 @@ class MainActivity : FlutterFragmentActivity() {
             if (!file.exists()) return false
 
             val uri: Uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
-            val extension = MimeTypeMap.getFileExtensionFromUrl(Uri.fromFile(file).toString())
-            val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase()) ?: "*/*"
+            val extension = file.extension
+            val mimeType = if (extension.isNotEmpty()) {
+                MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension.lowercase()) ?: "*/*"
+            } else {
+                "*/*"
+            }
 
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, mimeType)
@@ -175,40 +232,48 @@ class MainActivity : FlutterFragmentActivity() {
 
     private fun getRecentSms(limit: Int): List<Map<String, Any?>> {
         val smsList = mutableListOf<Map<String, Any?>>()
-        val cursor = contentResolver.query(
-            Telephony.Sms.CONTENT_URI,
-            arrayOf(
-                Telephony.Sms._ID,
-                Telephony.Sms.ADDRESS,
-                Telephony.Sms.BODY,
-                Telephony.Sms.DATE,
-                Telephony.Sms.TYPE,
-                Telephony.Sms.THREAD_ID
-            ),
-            null,
-            null,
-            "${Telephony.Sms.DATE} DESC LIMIT $limit"
-        )
+        try {
+            val cursor = contentResolver.query(
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE,
+                    Telephony.Sms.THREAD_ID
+                ),
+                null,
+                null,
+                "${Telephony.Sms.DATE} DESC"
+            )
 
-        cursor?.use {
-            val idIndex = it.getColumnIndex(Telephony.Sms._ID)
-            val addressIndex = it.getColumnIndex(Telephony.Sms.ADDRESS)
-            val bodyIndex = it.getColumnIndex(Telephony.Sms.BODY)
-            val dateIndex = it.getColumnIndex(Telephony.Sms.DATE)
-            val typeIndex = it.getColumnIndex(Telephony.Sms.TYPE)
-            val threadIdIndex = it.getColumnIndex(Telephony.Sms.THREAD_ID)
+            cursor?.use {
+                val idIndex = it.getColumnIndex(Telephony.Sms._ID)
+                val addressIndex = it.getColumnIndex(Telephony.Sms.ADDRESS)
+                val bodyIndex = it.getColumnIndex(Telephony.Sms.BODY)
+                val dateIndex = it.getColumnIndex(Telephony.Sms.DATE)
+                val typeIndex = it.getColumnIndex(Telephony.Sms.TYPE)
+                val threadIdIndex = it.getColumnIndex(Telephony.Sms.THREAD_ID)
 
-            while (it.moveToNext()) {
-                val sms = mapOf(
-                    "id" to it.getLong(idIndex),
-                    "address" to it.getString(addressIndex),
-                    "body" to it.getString(bodyIndex),
-                    "date" to it.getLong(dateIndex),
-                    "type" to it.getInt(typeIndex),
-                    "thread_id" to it.getLong(threadIdIndex)
-                )
-                smsList.add(sms)
+                var count = 0
+                while (it.moveToNext() && count < limit) {
+                    val sms = mapOf(
+                        "id" to it.getLong(idIndex),
+                        "address" to (it.getString(addressIndex) ?: "Unknown"),
+                        "body" to (it.getString(bodyIndex) ?: ""),
+                        "date" to it.getLong(dateIndex),
+                        "type" to it.getInt(typeIndex),
+                        "thread_id" to it.getLong(threadIdIndex)
+                    )
+                    smsList.add(sms)
+                    count++
+                }
             }
+        } catch (e: SecurityException) {
+            // Missing READ_SMS permission
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
 
         return smsList

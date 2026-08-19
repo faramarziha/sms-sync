@@ -24,7 +24,7 @@ class ClientSyncService {
 
   /// Stable device ID derived from platform hash — survives app restarts
   late final String deviceId;
-  late final String deviceName;
+  late String deviceName;
 
   ClientState _state = ClientState.idle;
   ClientState get state => _state;
@@ -33,6 +33,23 @@ class ClientSyncService {
   SyncScope get scope => _scope;
 
   static const String _scopePrefKey = 'sync_scope';
+  static const String _deviceNamePrefKey = 'device_name';
+  static const String _lastServerAddressKey = 'last_server_address';
+  static const String _lastServerPortKey = 'last_server_port';
+  static const String _lastServerNameKey = 'last_server_name';
+  static const String _lastPinKey = 'last_pin';
+
+  /// True while an automatic reconnect (saved server) is in flight so the UI
+  /// can suppress the manual PIN dialog.
+  bool autoPairingInProgress = false;
+
+  /// Recent OTP codes captured on the phone (kept in memory for the session).
+  final List<Map<String, String>> otpHistory = [];
+  final _otpHistoryController = StreamController<List<Map<String, String>>>.broadcast();
+  Stream<List<Map<String, String>>> get otpHistoryStream => _otpHistoryController.stream;
+
+  DateTime? lastSyncTime;
+  int lastSyncedSmsCount = 0;
 
   /// Load previously saved scope from persistent storage
   Future<void> loadSavedScope() async {
@@ -46,6 +63,107 @@ class ClientSyncService {
       }
     } catch (e) {
       debugPrint('Failed to load saved scope: $e');
+    }
+  }
+
+  /// Load the user-defined device name (falls back to the platform default).
+  Future<void> loadSavedDeviceName() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getString(_deviceNamePrefKey);
+      if (saved != null && saved.isNotEmpty) {
+        deviceName = saved;
+      }
+    } catch (e) {
+      debugPrint('Failed to load device name: $e');
+    }
+  }
+
+  /// Persist a custom device name shown on the Windows server.
+  Future<void> setDeviceName(String name) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) return;
+    deviceName = trimmed;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_deviceNamePrefKey, trimmed);
+    } catch (e) {
+      debugPrint('Failed to save device name: $e');
+    }
+  }
+
+  /// Remember the last successfully-paired server + PIN so the app can
+  /// reconnect on the next launch without re-entering the PIN (personal use).
+  Future<void> persistLastConnection(DiscoveredServer server, String pin) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_lastServerAddressKey, server.address);
+      await prefs.setInt(_lastServerPortKey, server.port);
+      await prefs.setString(_lastServerNameKey, server.name);
+      await prefs.setString(_lastPinKey, pin);
+    } catch (e) {
+      debugPrint('Failed to persist last connection: $e');
+    }
+  }
+
+  Future<DiscoveredServer?> getLastServer() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final address = prefs.getString(_lastServerAddressKey);
+      final port = prefs.getInt(_lastServerPortKey);
+      if (address != null && address.isNotEmpty && port != null) {
+        return DiscoveredServer(
+          name: prefs.getString(_lastServerNameKey) ?? 'Saved PC',
+          address: address,
+          port: port,
+        );
+      }
+    } catch (e) {
+      debugPrint('Failed to load last server: $e');
+    }
+    return null;
+  }
+
+  Future<String?> getLastPin() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(_lastPinKey);
+    } catch (e) {
+      debugPrint('Failed to load last pin: $e');
+      return null;
+    }
+  }
+
+  Future<void> clearLastConnection() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_lastServerAddressKey);
+      await prefs.remove(_lastServerPortKey);
+      await prefs.remove(_lastServerNameKey);
+      await prefs.remove(_lastPinKey);
+    } catch (e) {
+      debugPrint('Failed to clear last connection: $e');
+    }
+  }
+
+  /// Reconnect to the previously paired server (and PIN) if one was saved.
+  /// This is intentionally best-effort: failures fall back to normal browsing.
+  Future<void> autoReconnectIfSaved() async {
+    await loadSavedScope();
+    final server = await getLastServer();
+    final pin = await getLastPin();
+    if (server == null || pin == null || pin.isEmpty) return;
+
+    autoPairingInProgress = true;
+    try {
+      await connectToServer(server);
+      if (_state == ClientState.pairing) {
+        await sendPairRequest(pin, scope: _scope);
+      }
+    } catch (e) {
+      debugPrint('Auto-reconnect failed: $e');
+    } finally {
+      autoPairingInProgress = false;
     }
   }
 
@@ -103,23 +221,39 @@ class ClientSyncService {
     final body = sms['body'] as String? ?? '';
     final address = sms['address'] as String? ?? 'SMS';
 
-    // Send single incoming SMS to server immediately
-    final smsPayload = Map<String, dynamic>.from(sms);
-    smsPayload['device_id'] = deviceId;
-    smsPayload['device_name'] = deviceName;
-    try {
-      await transport.send(SyncMessage(
-        type: SyncMessageType.sms,
-        payload: smsPayload,
-      ));
-    } catch (e) {
-      debugPrint("Failed to send real-time SMS: $e");
+    // SMS and OTP data must never leave the phone when the user selected the
+    // text/files-only scope.
+    if (_scope != SyncScope.smsSim && _scope != SyncScope.both) return;
+
+    // Send single incoming SMS to server immediately (respect the selected scope).
+    if (_scope == SyncScope.smsSim || _scope == SyncScope.both) {
+      final smsPayload = Map<String, dynamic>.from(sms);
+      smsPayload['device_id'] = deviceId;
+      smsPayload['device_name'] = deviceName;
+      try {
+        await transport.send(SyncMessage(
+          type: SyncMessageType.sms,
+          payload: smsPayload,
+        ));
+      } catch (e) {
+        debugPrint("Failed to send real-time SMS: $e");
+      }
     }
 
     // Extract OTP from real-time incoming SMS
     final otp = OtpExtractor.extractOtp(body);
     if (otp != null) {
       debugPrint("Real-time OTP extracted: $otp from $address");
+
+      // Keep a local history so the user can copy recent codes on the phone too.
+      otpHistory.insert(0, {
+        'otp': otp,
+        'sender': address,
+        'timestamp': DateTime.now().millisecondsSinceEpoch.toString(),
+      });
+      if (otpHistory.length > 20) otpHistory.removeLast();
+      _otpHistoryController.add(List.from(otpHistory));
+
       try {
         await transport.send(SyncMessage(
           type: SyncMessageType.otpCode,
@@ -200,6 +334,9 @@ class ClientSyncService {
       case SyncMessageType.pairVerify:
         if (message.payload['status'] == 'success') {
           _reconnectAttempts = 0;
+          if (_lastConnectedServer != null && _lastPin != null) {
+            await persistLastConnection(_lastConnectedServer!, _lastPin!);
+          }
           _updateState(ClientState.syncing);
           _startForegroundService();
           await _runSync();
@@ -208,13 +345,19 @@ class ClientSyncService {
         }
         break;
       case SyncMessageType.rawText:
-        _textMessagesController.add(message.payload);
+        if (_scope == SyncScope.both || _scope == SyncScope.textFiles) {
+          _textMessagesController.add(message.payload);
+        }
         break;
       case SyncMessageType.fileHeader:
-        await fileTransfer.handleFileHeader(message.payload);
+        if (_scope == SyncScope.both || _scope == SyncScope.textFiles) {
+          await fileTransfer.handleFileHeader(message.payload);
+        }
         break;
       case SyncMessageType.fileChunk:
-        await fileTransfer.handleFileChunk(message.payload);
+        if (_scope == SyncScope.both || _scope == SyncScope.textFiles) {
+          await fileTransfer.handleFileChunk(message.payload);
+        }
         break;
       case SyncMessageType.clipboardSync:
         if (_scope == SyncScope.both || _scope == SyncScope.textFiles) {
@@ -247,7 +390,7 @@ class ClientSyncService {
 
     _reconnectAttempts++;
     // Exponential backoff: 2s, 4s, 8s, up to max 30s
-    final delaySeconds = (_reconnectAttempts <= 1) ? 2 : (_reconnectAttempts * 3).clamp(2, 30);
+    final delaySeconds = (_reconnectAttempts <= 1) ? 2 : (_reconnectAttempts * 3).clamp(2, 30).toInt();
     debugPrint('Scheduling auto-reconnect attempt #$_reconnectAttempts in $delaySeconds seconds...');
 
     _autoReconnectTimer = Timer(Duration(seconds: delaySeconds), () async {
@@ -270,6 +413,9 @@ class ClientSyncService {
 
   Future<void> sendRawText(String text) async {
     if (text.trim().isEmpty) return;
+    if (_scope == SyncScope.smsSim) {
+      throw StateError('Text sync is disabled for the selected mode');
+    }
     final payload = {
       'text': text,
       'sender': deviceName,
@@ -285,6 +431,9 @@ class ClientSyncService {
   }
 
   Future<void> sendFile(File file) async {
+    if (_scope == SyncScope.smsSim) {
+      throw StateError('File sync is disabled for the selected mode');
+    }
     await fileTransfer.sendFile(
       file: file,
       sender: deviceName,
@@ -326,6 +475,7 @@ class ClientSyncService {
           }
 
           final smsList = await nativeBridge.getRecentSms(limit: 100);
+          lastSyncedSmsCount = smsList.length;
           if (smsList.isNotEmpty) {
             final smsPayloads = smsList.map((sms) {
               final smsPayload = Map<String, dynamic>.from(sms);
@@ -345,6 +495,7 @@ class ClientSyncService {
         }
       }
 
+      lastSyncTime = DateTime.now();
       _updateState(ClientState.synced);
       _startClipboardSync();
       _startPeriodicSync();
@@ -410,6 +561,7 @@ class ClientSyncService {
     _stopPeriodicSync();
     _stopForegroundService();
     clipboardService.stopMonitoring();
+    await clearLastConnection();
     await transport.disconnect();
     _updateState(ClientState.idle);
   }
@@ -426,5 +578,6 @@ class ClientSyncService {
     await transport.disconnect();
     _stateController.close();
     _textMessagesController.close();
+    _otpHistoryController.close();
   }
 }

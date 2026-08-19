@@ -1,9 +1,11 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../core/file_launcher.dart';
 import '../../core/models/sync_message.dart';
@@ -95,6 +97,123 @@ class _RadarPainter extends CustomPainter {
       old.sweepAngle != sweepAngle || old.dotCount != dotCount;
 }
 
+// ──────────────────────────────────────────
+// QR Scanner Sheet
+// ──────────────────────────────────────────
+class _QrScannerSheet extends StatefulWidget {
+  final ValueChanged<Map<String, dynamic>> onScanned;
+  const _QrScannerSheet({required this.onScanned});
+
+  @override
+  State<_QrScannerSheet> createState() => _QrScannerSheetState();
+}
+
+class _QrScannerSheetState extends State<_QrScannerSheet> {
+  MobileScannerController? _controller;
+  bool _handled = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = MobileScannerController(
+      formats: const [BarcodeFormat.qrCode],
+      detectionSpeed: DetectionSpeed.noDuplicates,
+    );
+  }
+
+  @override
+  void dispose() {
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  void _onDetect(BarcodeCapture capture) {
+    // Guard against the scanner firing multiple times for the same code, which
+    // previously caused duplicate connect attempts / double Navigator.pop.
+    if (_handled) return;
+    for (final barcode in capture.barcodes) {
+      final raw = barcode.rawValue;
+      if (raw == null || raw.isEmpty) continue;
+      try {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) {
+          _handled = true;
+          widget.onScanned(decoded);
+          return;
+        }
+      } catch (_) {}
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 480,
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        children: [
+          Container(
+            width: 40,
+            height: 4,
+            decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF58A6FF)),
+              const SizedBox(width: 8),
+              Text(
+                'اسکن کد QR سرور',
+                style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: MobileScanner(
+                controller: _controller!,
+                onDetect: _onDetect,
+                errorBuilder: (_, __, ___) {
+                  return Container(
+                    color: const Color(0xFF0D1117),
+                    alignment: Alignment.center,
+                    padding: const EdgeInsets.all(24),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(Icons.no_photography_rounded, color: Color(0xFFFF7B72), size: 40),
+                        const SizedBox(height: 12),
+                        Text(
+                          'دوربین در دسترس نیست',
+                          style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w600, color: Colors.white),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'مطمئن شوید برنامه دیگری از دوربین استفاده نمی‌کند.',
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(fontSize: 12, color: Colors.white54),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            'کد QR نمایش داده شده روی نسخه ویندوز را اسکن کنید.',
+            style: GoogleFonts.inter(fontSize: 12, color: Colors.white54),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class ClientHomeScreen extends StatefulWidget {
   final ClientSyncService service;
   const ClientHomeScreen({super.key, required this.service});
@@ -113,6 +232,8 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
   StreamSubscription<List<DiscoveredServer>>? _discoverySubscription;
   StreamSubscription<ClientState>? _stateSubscription;
   StreamSubscription<Map<String, dynamic>>? _textSubscription;
+  StreamSubscription<List<Map<String, String>>>? _otpSubscription;
+  List<Map<String, String>> _otpHistory = [];
 
   bool _isPairingDialogShowing = false;
   bool _isAutoPairing = false;
@@ -153,7 +274,10 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
 
     _stateSubscription = widget.service.stateStream.listen((state) {
       if (mounted) setState(() {});
-      if (state == ClientState.pairing && !_isPairingDialogShowing && !_isAutoPairing) {
+      if (state == ClientState.pairing &&
+          !_isPairingDialogShowing &&
+          !_isAutoPairing &&
+          !widget.service.autoPairingInProgress) {
         _showPairingDialog();
       }
       if (state != ClientState.pairing && state != ClientState.connecting) {
@@ -167,7 +291,20 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
       }
     });
 
+    _otpSubscription = widget.service.otpHistoryStream.listen((list) {
+      if (mounted) {
+        setState(() => _otpHistory = list);
+      }
+    });
+
+    widget.service.loadSavedDeviceName();
     widget.service.startDiscovery();
+
+    // Restore the previously selected sync mode and try to reconnect to the
+    // last paired server (personal single-device convenience).
+    widget.service.autoReconnectIfSaved().then((_) {
+      if (mounted) setState(() => _selectedScope = widget.service.scope);
+    });
   }
 
   @override
@@ -205,6 +342,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     _discoverySubscription?.cancel();
     _stateSubscription?.cancel();
     _textSubscription?.cancel();
+    _otpSubscription?.cancel();
     _pinController.dispose();
     _ipController.dispose();
     _portController.dispose();
@@ -348,10 +486,26 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                             backgroundColor: const Color(0xFF1F6FEB),
                             padding: const EdgeInsets.symmetric(vertical: 14),
                           ),
-                          onPressed: () {
+                          onPressed: () async {
+                            final pin = _pinController.text.trim();
+                            if (pin.length != 4 || int.tryParse(pin) == null) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(content: Text('لطفاً PIN چهار رقمی را وارد کنید')),
+                              );
+                              return;
+                            }
+
                             _isPairingDialogShowing = false;
-                            widget.service.sendPairRequest(_pinController.text, scope: _selectedScope);
                             Navigator.pop(context);
+                            try {
+                              await widget.service.sendPairRequest(pin, scope: _selectedScope);
+                            } catch (e) {
+                              if (mounted) {
+                                ScaffoldMessenger.of(this.context).showSnackBar(
+                                  SnackBar(content: Text('خطا در ارسال PIN: $e')),
+                                );
+                              }
+                            }
                           },
                         ),
                       ),
@@ -418,73 +572,68 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     );
   }
 
-  void _showQrScannerDialog() {
+  Future<void> _showQrScannerDialog() async {
+    // Request camera permission explicitly so a denial shows a clear message
+    // instead of a silent black camera preview.
+    if (Platform.isAndroid || Platform.isIOS) {
+      var status = await Permission.camera.status;
+      if (status.isDenied || status.isRestricted) {
+        status = await Permission.camera.request();
+      }
+      if (!status.isGranted) {
+        if (mounted) {
+          final permanentlyDenied = status.isPermanentlyDenied;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                permanentlyDenied
+                    ? 'دسترسی دوربین غیرفعال است. لطفاً آن را از تنظیمات فعال کنید.'
+                    : 'برای اسکن کد QR به دسترسی دوربین نیاز است.',
+              ),
+              action: permanentlyDenied
+                  ? SnackBarAction(
+                      label: 'تنظیمات',
+                      onPressed: () => openAppSettings(),
+                    )
+                  : null,
+            ),
+          );
+        }
+        return;
+      }
+    }
+
+    if (!mounted) return;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       backgroundColor: const Color(0xFF161B22),
       shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
-      builder: (context) {
-        return Container(
-          height: 480,
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            children: [
-              Container(
-                width: 40,
-                height: 4,
-                decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF58A6FF)),
-                  const SizedBox(width: 8),
-                  Text('اسکن کد QR سرور', style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(16),
-                  child: MobileScanner(
-                    onDetect: (capture) async {
-                      final List<Barcode> barcodes = capture.barcodes;
-                      for (final barcode in barcodes) {
-                        final raw = barcode.rawValue;
-                        if (raw != null && raw.isNotEmpty) {
-                          try {
-                            final data = jsonDecode(raw) as Map<String, dynamic>;
-                            final address = data['address'] as String?;
-                            final port = data['port'] as int? ?? 8080;
-                            final pin = data['pin'] as String?;
+      builder: (context) => _QrScannerSheet(
+        onScanned: (data) {
+          final address = data['address']?.toString();
+          final port = data['port'] is num ? (data['port'] as num).toInt() : 8080;
+          final pin = data['pin']?.toString();
+          if (address == null || pin == null || pin.isEmpty) return;
 
-                            if (address != null && pin != null) {
-                              _isAutoPairing = true;
-                              Navigator.pop(context);
-                              await widget.service.connectToServer(
-                                DiscoveredServer(name: 'Scanned PC', address: address, port: port),
-                              );
-                              await widget.service.sendPairRequest(pin);
-                              break;
-                            }
-                          } catch (_) {}
-                        }
-                      }
-                    },
-                  ),
-                ),
-              ),
-              const SizedBox(height: 12),
-              Text(
-                'کد QR نمایش داده شده روی نسخه ویندوز را اسکن کنید.',
-                style: GoogleFonts.inter(fontSize: 12, color: Colors.white54),
-              ),
-            ],
-          ),
-        );
-      },
+          _isAutoPairing = true;
+          Navigator.pop(context);
+          widget.service
+              .connectToServer(
+                DiscoveredServer(name: 'Scanned PC', address: address, port: port),
+              )
+              .then((_) {
+            if (widget.service.state == ClientState.pairing) {
+              widget.service.sendPairRequest(pin, scope: _selectedScope).catchError((Object e) {
+                debugPrint('Failed to send QR pair request: $e');
+              });
+            }
+          })
+              .catchError((Object e) {
+            debugPrint('QR connect failed: $e');
+          });
+        },
+      ),
     );
   }
 
@@ -578,11 +727,56 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     );
   }
 
+  Future<void> _showDeviceNameDialog() async {
+    final controller = TextEditingController(text: widget.service.deviceName);
+    await showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('نام دستگاه'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          maxLength: 40,
+          style: GoogleFonts.inter(color: Colors.white, fontSize: 14),
+          decoration: const InputDecoration(hintText: 'مثلاً: گوشی شخصی من'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('انصراف')),
+          ElevatedButton(
+            onPressed: () {
+              final name = controller.text.trim();
+              Navigator.pop(context);
+              if (name.isNotEmpty) {
+                widget.service.setDeviceName(name).then((_) {
+                  if (mounted) setState(() {});
+                });
+              }
+            },
+            child: const Text('ذخیره'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+  }
+
   Future<void> _pickAndSendFile() async {
     final result = await FilePicker.platform.pickFiles();
-    if (result != null && result.files.single.path != null) {
-      final file = File(result.files.single.path!);
-      await widget.service.sendFile(file);
+    if (result == null || result.files.single.path == null) return;
+
+    try {
+      await widget.service.sendFile(File(result.files.single.path!));
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('فایل برای کامپیوتر ارسال شد'), duration: Duration(seconds: 2)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('خطا در ارسال فایل: $e')),
+        );
+      }
     }
   }
 
@@ -595,6 +789,76 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
         border: Border.all(color: color.withValues(alpha: 0.3)),
       ),
       child: Text(text, style: GoogleFonts.inter(fontSize: 10, fontWeight: FontWeight.w600, color: color)),
+    );
+  }
+
+  Widget _buildClientIntroCard() {
+    final state = widget.service.state;
+    final isConnected = state == ClientState.synced;
+    final accent = isConnected ? const Color(0xFF7EE787) : const Color(0xFF58A6FF);
+    final title = isConnected ? 'همگام‌سازی فعال است' : 'گوشی را به کامپیوتر وصل کنید';
+    final subtitle = isConnected
+        ? 'پیامک‌ها، متن‌ها و فایل‌ها در شبکه محلی شما آماده‌اند.'
+        : 'دستگاه‌های اطراف را پیدا کنید یا با QR سریع جفت شوید.';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 350),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [accent.withValues(alpha: 0.16), const Color(0xFF161B22)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: accent.withValues(alpha: 0.24)),
+          boxShadow: [
+            BoxShadow(color: accent.withValues(alpha: 0.08), blurRadius: 20, offset: const Offset(0, 8)),
+          ],
+        ),
+        child: Row(
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 350),
+              padding: const EdgeInsets.all(11),
+              decoration: BoxDecoration(
+                color: accent.withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: Icon(
+                isConnected ? Icons.verified_rounded : Icons.phonelink_rounded,
+                color: accent,
+                size: 24,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 250),
+                    child: Text(
+                      title,
+                      key: ValueKey(title),
+                      style: GoogleFonts.inter(fontSize: 15, fontWeight: FontWeight.w800, color: Colors.white),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    subtitle,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: GoogleFonts.inter(fontSize: 11, color: Colors.white60, height: 1.4),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -659,96 +923,187 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     return Center(
       child: FadeTransition(
         opacity: _fadeAnimation,
-        child: SingleChildScrollView(
-          child: Padding(
-            padding: const EdgeInsets.all(20.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                _buildBatteryOptimizationBanner(),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    gradient: const LinearGradient(
-                      colors: [Color(0xFF238636), Color(0xFF7EE787)],
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
+        child: RefreshIndicator(
+          color: const Color(0xFF58A6FF),
+          onRefresh: () => widget.service.manualRefreshSync(),
+          child: SingleChildScrollView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            child: Padding(
+              padding: const EdgeInsets.all(20.0),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _buildBatteryOptimizationBanner(),
+                  if (widget.service.lastSyncTime != null) _buildSyncSummary(),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(20),
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: const LinearGradient(
+                        colors: [Color(0xFF238636), Color(0xFF7EE787)],
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                      ),
+                      boxShadow: [
+                        BoxShadow(color: const Color(0xFF7EE787).withValues(alpha: 0.2), blurRadius: 30, spreadRadius: 5),
+                      ],
                     ),
-                    boxShadow: [
-                      BoxShadow(color: const Color(0xFF7EE787).withValues(alpha: 0.2), blurRadius: 30, spreadRadius: 5),
+                    child: const Icon(Icons.check_rounded, size: 48, color: Colors.white),
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    'SMS & SIM Auto-Sync Active',
+                    style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'پیامک‌های جدید بدون تاخیر و به صورت لحظه‌ای به کامپیوتر ارسال می‌شوند',
+                    style: GoogleFonts.inter(color: Colors.white60, fontSize: 13),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 20),
+                  Wrap(
+                    alignment: WrapAlignment.center,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 10,
+                    runSpacing: 10,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF7EE787).withValues(alpha: 0.08),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: const Color(0xFF7EE787).withValues(alpha: 0.2)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: const BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: Color(0xFF7EE787),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              'سینک لحظه‌ای و کم‌مصرف',
+                              style: GoogleFonts.inter(color: const Color(0xFF7EE787), fontWeight: FontWeight.w600, fontSize: 12),
+                            ),
+                          ],
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () async {
+                          await widget.service.manualRefreshSync();
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('همگام‌سازی پیامک‌ها و سیم‌کارت انجام شد'),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.sync_rounded, size: 14, color: Color(0xFF58A6FF)),
+                        label: Text('همگام‌سازی دستی', style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF58A6FF))),
+                        style: OutlinedButton.styleFrom(
+                          side: BorderSide(color: const Color(0xFF58A6FF).withValues(alpha: 0.3)),
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        ),
+                      ),
                     ],
                   ),
-                  child: const Icon(Icons.check_rounded, size: 48, color: Colors.white),
-                ),
-                const SizedBox(height: 24),
-                Text(
-                  'SMS & SIM Auto-Sync Active',
-                  style: GoogleFonts.inter(fontSize: 20, fontWeight: FontWeight.w700, color: Colors.white),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  'پیامک‌های جدید بدون تاخیر و به صورت لحظه‌ای به کامپیوتر ارسال می‌شوند',
-                  style: GoogleFonts.inter(color: Colors.white60, fontSize: 13),
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF7EE787).withValues(alpha: 0.08),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: const Color(0xFF7EE787).withValues(alpha: 0.2)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: const BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: Color(0xFF7EE787),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            'سینک لحظه‌ای و کم‌مصرف',
-                            style: GoogleFonts.inter(color: const Color(0xFF7EE787), fontWeight: FontWeight.w600, fontSize: 12),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    OutlinedButton.icon(
-                      onPressed: () async {
-                        await widget.service.manualRefreshSync();
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('همگام‌سازی پیامک‌ها و سیم‌کارت انجام شد'),
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        }
-                      },
-                      icon: const Icon(Icons.sync_rounded, size: 14, color: Color(0xFF58A6FF)),
-                      label: Text('همگام‌سازی دستی', style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF58A6FF))),
-                      style: OutlinedButton.styleFrom(
-                        side: BorderSide(color: const Color(0xFF58A6FF).withValues(alpha: 0.3)),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      ),
-                    ),
+                  if (_otpHistory.isNotEmpty) ...[
+                    const SizedBox(height: 24),
+                    _buildOtpHistorySection(),
                   ],
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildSyncSummary() {
+    final time = widget.service.lastSyncTime!;
+    final count = widget.service.lastSyncedSmsCount;
+    final hh = time.hour.toString().padLeft(2, '0');
+    final mm = time.minute.toString().padLeft(2, '0');
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF58A6FF).withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF58A6FF).withValues(alpha: 0.2)),
+      ),
+      child: Row(children: [
+        const Icon(Icons.history_rounded, size: 18, color: Color(0xFF58A6FF)),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Text(
+            'آخرین همگام‌سازی: $hh:$mm — $count پیامک',
+            style: GoogleFonts.inter(fontSize: 12, color: Colors.white70),
+          ),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildOtpHistorySection() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF161B22),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(children: [
+            const Icon(Icons.key_rounded, size: 16, color: Color(0xFF7EE787)),
+            const SizedBox(width: 8),
+            Text('کدهای پویای اخیر', style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white70)),
+          ]),
+          const SizedBox(height: 10),
+          ..._otpHistory.take(5).map((item) {
+            final otp = item['otp'] ?? '';
+            final sender = item['sender'] ?? '';
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(children: [
+                Expanded(
+                  child: Text(
+                    '$otp  •  $sender',
+                    style: GoogleFonts.jetBrainsMono(fontSize: 13, color: Colors.white),
+                  ),
+                ),
+                TextButton.icon(
+                  icon: const Icon(Icons.copy_rounded, size: 14, color: Color(0xFF58A6FF)),
+                  label: const Text('کپی'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF58A6FF),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: otp));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('کد کپی شد'), duration: Duration(seconds: 1)),
+                    );
+                  },
+                ),
+              ]),
+            );
+          }).toList(),
+        ],
       ),
     );
   }
@@ -796,8 +1151,9 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                         label: Text('ارسال کلیپ‌بورد به کامپیوتر', style: GoogleFonts.inter(fontSize: 12, color: const Color(0xFF58A6FF))),
                         onPressed: () async {
                           final text = await widget.service.clipboardService.getText();
-                          if (text != null && text.isNotEmpty) {
-                            widget.service.sendRawText(text);
+                          if (text == null || text.isEmpty) return;
+                          try {
+                            await widget.service.sendRawText(text);
                             if (!mounted) return;
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
@@ -805,6 +1161,12 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                                 duration: Duration(seconds: 2),
                               ),
                             );
+                          } catch (e) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(content: Text('خطا در ارسال متن: $e')),
+                              );
+                            }
                           }
                         },
                       ),
@@ -818,10 +1180,18 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                     ElevatedButton.icon(
                       icon: const Icon(Icons.send_rounded, size: 18),
                       label: const Text('Send'),
-                      onPressed: () {
-                        if (_textInputController.text.isNotEmpty) {
-                          widget.service.sendRawText(_textInputController.text);
+                      onPressed: () async {
+                        final text = _textInputController.text.trim();
+                        if (text.isEmpty) return;
+                        try {
+                          await widget.service.sendRawText(text);
                           _textInputController.clear();
+                        } catch (e) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('خطا در ارسال متن: $e')),
+                            );
+                          }
                         }
                       },
                     ),
@@ -1041,6 +1411,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
   Widget _buildScanningView() {
     return Column(
       children: [
+        _buildClientIntroCard(),
         _buildBatteryOptimizationBanner(),
         Expanded(
           child: Center(
@@ -1064,9 +1435,13 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                   ),
                 ),
                 const SizedBox(height: 24),
-                Text(
-                  _servers.isEmpty ? 'Scanning for servers...' : '${_servers.length} server(s) found',
-                  style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white70),
+                AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 250),
+                  child: Text(
+                    _servers.isEmpty ? 'در حال جستجوی کامپیوترها...' : '${_servers.length} کامپیوتر پیدا شد',
+                    key: ValueKey(_servers.length),
+                    style: GoogleFonts.inter(fontSize: 16, fontWeight: FontWeight.w700, color: Colors.white70),
+                  ),
                 ),
                 const SizedBox(height: 8),
                 Text(
@@ -1299,24 +1674,63 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
               child: const Icon(Icons.sync_rounded, size: 16, color: Colors.white),
             ),
             const SizedBox(width: 10),
-            Text('SMS Sync', style: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 18)),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('SMS Sync', style: GoogleFonts.inter(fontWeight: FontWeight.w700, fontSize: 18, height: 1.05)),
+                Text(
+                  widget.service.deviceName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(fontSize: 10, color: Colors.white38, fontWeight: FontWeight.w400),
+                ),
+              ],
+            ),
           ],
         ),
         actions: [
+          IconButton(
+            icon: Icon(Icons.drive_file_rename_outline_rounded, color: Colors.white.withValues(alpha: 0.5), size: 22),
+            tooltip: 'تغییر نام دستگاه',
+            onPressed: _showDeviceNameDialog,
+          ),
           IconButton(
             icon: const Icon(Icons.qr_code_scanner_rounded, color: Color(0xFF58A6FF), size: 22),
             tooltip: 'Scan QR Code',
             onPressed: _showQrScannerDialog,
           ),
-          IconButton(
-            icon: Icon(Icons.refresh_rounded, color: Colors.white.withValues(alpha: 0.5), size: 22),
-            tooltip: 'Rescan',
-            onPressed: () => widget.service.startDiscovery(),
-          ),
-          IconButton(
-            icon: Icon(Icons.add_link_rounded, color: Colors.white.withValues(alpha: 0.5), size: 22),
-            tooltip: 'Manual IP',
-            onPressed: _showManualConnectDialog,
+          PopupMenuButton<String>(
+            icon: Icon(Icons.more_horiz_rounded, color: Colors.white.withValues(alpha: 0.65), size: 23),
+            tooltip: 'ابزارهای اتصال',
+            onSelected: (action) {
+              switch (action) {
+                case 'rescan':
+                  widget.service.startDiscovery();
+                  break;
+                case 'manual':
+                  _showManualConnectDialog();
+                  break;
+              }
+            },
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'rescan',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.refresh_rounded, color: Color(0xFF58A6FF)),
+                  title: Text('جستجوی دوباره'),
+                ),
+              ),
+              PopupMenuItem(
+                value: 'manual',
+                child: ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  leading: Icon(Icons.add_link_rounded, color: Color(0xFFD2A8FF)),
+                  title: Text('اتصال با آدرس IP'),
+                ),
+              ),
+            ],
           ),
         ],
         bottom: isSynced
@@ -1336,8 +1750,12 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
         builder: (context, snapshot) {
           final currentState = snapshot.data;
 
-          return Column(
-            children: [
+          return AnimatedSwitcher(
+            duration: const Duration(milliseconds: 350),
+            child: KeyedSubtree(
+              key: ValueKey(currentState),
+              child: Column(
+                children: [
               _buildStatusBar(currentState),
 
               if (currentState == ClientState.synced)
@@ -1450,7 +1868,9 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                     ),
                   ),
                 ),
-            ],
+                ],
+              ),
+            ),
           );
         },
       ),

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
@@ -59,8 +60,16 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   List<Map<String, dynamic>> _sims = [];
   List<Map<String, dynamic>> _rawTexts = [];
   List<DiscoveredServer> _discoveredClients = [];
+  List<Map<String, dynamic>> _conversations = [];
+  Map<String, dynamic> _stats = {};
+  bool _refreshInFlight = false;
 
   String? _selectedDeviceId;
+  String _smsSearchQuery = '';
+  bool _conversationMode = false;
+  String? _activeConversationAddress;
+  int _smsTypeFilter = 0; // 0 = all, 1 = received, 2 = sent
+  bool _starredOnly = false;
 
   StreamSubscription<ServerState>? _stateSubscription;
   StreamSubscription<void>? _dataSubscription;
@@ -68,6 +77,7 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   StreamSubscription<Map<String, String>>? _otpSubscription;
 
   final TextEditingController _textSendController = TextEditingController();
+  final TextEditingController _smsSearchController = TextEditingController();
   TabController? _tabController;
 
   // Animations
@@ -196,6 +206,7 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     _discoveredClientsSubscription?.cancel();
     _otpSubscription?.cancel();
     _textSendController.dispose();
+    _smsSearchController.dispose();
     _tabController?.dispose();
     _glowController.dispose();
     _fadeController.dispose();
@@ -203,29 +214,50 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   }
 
   Future<void> _startServer() async {
-    await widget.service.startServer();
+    try {
+      await widget.service.startServer();
+    } catch (e) {
+      debugPrint('Failed to start server: $e');
+    }
     if (mounted) setState(() {});
   }
 
   Future<void> _refreshData() async {
-    final sms = await widget.service.db.getAllSms(deviceId: _selectedDeviceId);
-    final sims = await widget.service.db.getAllSims(deviceId: _selectedDeviceId);
-    final texts = await widget.service.db.getAllRawTexts(deviceId: _selectedDeviceId);
+    if (_refreshInFlight) return;
+    _refreshInFlight = true;
+    try {
+      final results = await Future.wait<Object?>([
+        widget.service.db.getAllSms(deviceId: _selectedDeviceId),
+        widget.service.db.getAllSims(deviceId: _selectedDeviceId),
+        widget.service.db.getAllRawTexts(deviceId: _selectedDeviceId),
+        widget.service.db.getConversations(deviceId: _selectedDeviceId),
+        widget.service.db.getStats(deviceId: _selectedDeviceId),
+      ]);
 
-    if (mounted) {
+      if (!mounted) return;
       setState(() {
-        _messages = sms;
-        _sims = sims;
-        _rawTexts = texts;
+        _messages = List<Map<String, dynamic>>.from(results[0] as List);
+        _sims = List<Map<String, dynamic>>.from(results[1] as List);
+        _rawTexts = List<Map<String, dynamic>>.from(results[2] as List);
+        _conversations = List<Map<String, dynamic>>.from(results[3] as List);
+        _stats = Map<String, dynamic>.from(results[4] as Map);
       });
+    } catch (e) {
+      debugPrint('Failed to refresh desktop data: $e');
+    } finally {
+      _refreshInFlight = false;
     }
   }
 
   Future<void> _pickAndSendFile() async {
     final result = await FilePicker.platform.pickFiles();
-    if (result != null && result.files.single.path != null) {
-      final file = File(result.files.single.path!);
-      await widget.service.sendFile(file);
+    if (result == null || result.files.single.path == null) return;
+
+    try {
+      await widget.service.sendFile(File(result.files.single.path!));
+      if (mounted) _showSnack('فایل برای گوشی ارسال شد');
+    } catch (e) {
+      if (mounted) _showSnack('خطا در ارسال فایل: $e');
     }
   }
 
@@ -262,94 +294,127 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   void _showMessageDetail(Map<String, dynamic> msg) {
     final date = DateTime.fromMillisecondsSinceEpoch(msg['date'] ?? 0);
     final typeLabel = _smsTypeLabel(msg['type']);
-    final deviceName = msg['device_name'] ?? 'Android Phone';
+    final deviceName = (msg['device_name'] ?? 'Android Phone').toString();
     final isReceived = msg['type'] == 1;
+    final id = msg['id']?.toString() ?? '';
+    final address = (msg['address'] ?? '').toString();
+    final body = (msg['body'] ?? '').toString();
+    bool starred = msg['is_starred'] == 1;
 
     showDialog(
       context: context,
-      builder: (context) => Dialog(
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 560),
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header
-              Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: isReceived
-                            ? [const Color(0xFF1F6FEB), const Color(0xFF58A6FF)]
-                            : [const Color(0xFF238636), const Color(0xFF7EE787)],
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => Dialog(
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 560),
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: isReceived
+                              ? [const Color(0xFF1F6FEB), const Color(0xFF58A6FF)]
+                              : [const Color(0xFF238636), const Color(0xFF7EE787)],
+                        ),
+                        borderRadius: BorderRadius.circular(12),
                       ),
-                      borderRadius: BorderRadius.circular(12),
+                      child: Icon(
+                        isReceived ? Icons.call_received_rounded : Icons.call_made_rounded,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                     ),
-                    child: Icon(
-                      isReceived ? Icons.call_received_rounded : Icons.call_made_rounded,
-                      color: Colors.white,
-                      size: 20,
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            address.isEmpty ? 'Unknown' : address,
+                            style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 2),
+                          Row(
+                            children: [
+                              _miniChip(deviceName, const Color(0xFF58A6FF)),
+                              const SizedBox(width: 8),
+                              _miniChip(typeLabel, isReceived ? const Color(0xFF58A6FF) : const Color(0xFF7EE787)),
+                            ],
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          msg['address'] ?? 'Unknown',
-                          style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w700),
-                        ),
-                        const SizedBox(height: 2),
-                        Row(
-                          children: [
-                            _miniChip(deviceName, const Color(0xFF58A6FF)),
-                            const SizedBox(width: 8),
-                            _miniChip(typeLabel, isReceived ? const Color(0xFF58A6FF) : const Color(0xFF7EE787)),
-                          ],
-                        ),
-                      ],
+                    IconButton(
+                      icon: Icon(
+                        starred ? Icons.star_rounded : Icons.star_border_rounded,
+                        color: starred ? const Color(0xFFE3B341) : Colors.white30,
+                      ),
+                      tooltip: starred ? 'حذف ستاره' : 'ستاره‌دار',
+                      onPressed: () async {
+                        final s = await widget.service.db.toggleSmsStarred(id);
+                        if (mounted) {
+                          setDialogState(() => starred = s);
+                          _refreshData();
+                        }
+                      },
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}  '
-                '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
-                style: GoogleFonts.inter(color: Colors.white54, fontSize: 12),
-              ),
-              Divider(height: 24, color: Colors.white.withValues(alpha: 0.08)),
-              // Body
-              Container(
-                constraints: const BoxConstraints(maxHeight: 300),
-                child: SingleChildScrollView(
-                  child: SelectableText(
-                    msg['body'] ?? '',
-                    style: GoogleFonts.inter(fontSize: 14, height: 1.7, color: Colors.white70),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '${date.year}/${date.month.toString().padLeft(2, '0')}/${date.day.toString().padLeft(2, '0')}  '
+                  '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
+                  style: GoogleFonts.inter(color: Colors.white54, fontSize: 12),
+                ),
+                Divider(height: 24, color: Colors.white.withValues(alpha: 0.08)),
+                // Body
+                Container(
+                  constraints: const BoxConstraints(maxHeight: 300),
+                  child: SingleChildScrollView(
+                    child: SelectableText(
+                      body,
+                      style: GoogleFonts.inter(fontSize: 14, height: 1.7, color: Colors.white70),
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(height: 16),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton.icon(
-                    icon: const Icon(Icons.copy_rounded, size: 16),
-                    label: const Text('Copy'),
-                    onPressed: () => _copyToClipboard(msg['body'] ?? '', 'Message'),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    onPressed: () => Navigator.pop(context),
-                    child: const Text('Close'),
-                  ),
-                ],
-              ),
-            ],
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    TextButton.icon(
+                      icon: const Icon(Icons.copy_rounded, size: 16),
+                      label: const Text('کپی متن'),
+                      onPressed: () => _copyToClipboard(body, 'Message'),
+                    ),
+                    TextButton.icon(
+                      icon: const Icon(Icons.phone_rounded, size: 16, color: Color(0xFF7EE787)),
+                      label: const Text('کپی شماره'),
+                      onPressed: () => _copyToClipboard(address, 'Number'),
+                    ),
+                    TextButton.icon(
+                      icon: const Icon(Icons.delete_outline_rounded, size: 16, color: Color(0xFFFF7B72)),
+                      label: const Text('حذف', style: TextStyle(color: Color(0xFFFF7B72))),
+                      onPressed: () async {
+                        Navigator.pop(context);
+                        await _deleteMessage(id);
+                      },
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('بستن'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -432,9 +497,135 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
     );
   }
 
+  // Desktop-first dashboard hero.
+  Widget _buildDesktopHero() {
+    final state = widget.service.state;
+    final isConnected = state == ServerState.paired;
+    final accent = isConnected ? const Color(0xFF7EE787) : const Color(0xFF58A6FF);
+    final deviceCount = widget.service.connectedClientCount;
+    final status = isConnected
+        ? '$deviceCount دستگاه متصل و آماده همگام‌سازی'
+        : 'برای شروع، گوشی را از طریق QR یا شبکه محلی متصل کنید';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 350),
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              accent.withValues(alpha: 0.16),
+              const Color(0xFF161B22),
+            ],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: accent.withValues(alpha: 0.25)),
+          boxShadow: [
+            BoxShadow(
+              color: accent.withValues(alpha: 0.08),
+              blurRadius: 24,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final actions = Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _showQrCodeDialog,
+                  icon: const Icon(Icons.qr_code_2_rounded, size: 17),
+                  label: const Text('نمایش QR'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFD2A8FF),
+                    side: BorderSide(color: const Color(0xFFD2A8FF).withValues(alpha: 0.55)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  ),
+                ),
+                ElevatedButton.icon(
+                  onPressed: _refreshData,
+                  icon: const Icon(Icons.sync_rounded, size: 17),
+                  label: const Text('به‌روزرسانی'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF1F6FEB),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  ),
+                ),
+              ],
+            );
+
+            final heading = Row(
+              children: [
+                AnimatedContainer(
+                  duration: const Duration(milliseconds: 350),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: accent.withValues(alpha: 0.16),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(
+                    isConnected ? Icons.wifi_rounded : Icons.radar_rounded,
+                    color: accent,
+                    size: 26,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'مرکز کنترل SMS Sync',
+                        style: GoogleFonts.inter(
+                          fontSize: 21,
+                          fontWeight: FontWeight.w800,
+                          color: Colors.white,
+                          letterSpacing: -0.4,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 250),
+                        child: Text(
+                          status,
+                          key: ValueKey(status),
+                          style: GoogleFonts.inter(fontSize: 12, color: Colors.white60),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+
+            if (constraints.maxWidth < 760) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [heading, const SizedBox(height: 16), actions],
+              );
+            }
+            return Row(
+              children: [
+                Expanded(child: heading),
+                const SizedBox(width: 16),
+                actions,
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   // ──────────────────────────────────────────
   // Feature Control Bar (OTP Toggle, Clipboard, QR)
   // ──────────────────────────────────────────
+  // Responsive controls for the desktop console.
   Widget _buildFeatureControlBar() {
     final isOtpEnabled = widget.service.isOtpExtractionEnabled;
     final isClipEnabled = widget.service.isClipboardSyncEnabled;
@@ -451,10 +642,15 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
+          _buildDesktopHero(),
+          Wrap(
+            alignment: WrapAlignment.center,
+            spacing: 12,
+            runSpacing: 12,
             children: [
               // 1. Auto OTP Extractor Toggle Switch
-              Expanded(
+              SizedBox(
+                width: 360,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
@@ -507,9 +703,9 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
               // 2. Shared Clipboard Sync Toggle
-              Expanded(
+              SizedBox(
+                width: 360,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
@@ -562,7 +758,6 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
               // 3. QR Pairing Button
               OutlinedButton.icon(
                 onPressed: _showQrCodeDialog,
@@ -901,6 +1096,9 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
   // SMS Tab
   // ──────────────────────────────────────────
   Widget _buildSmsTab() {
+    final filtered = _filteredMessages();
+    final showThread = _activeConversationAddress != null && !_conversationMode;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -908,111 +1106,577 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
         _buildSimCardsSection(),
         _buildDiscoveredClientsSection(),
         Divider(height: 1, color: Colors.white.withValues(alpha: 0.06)),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            children: [
-              const Icon(Icons.sms_rounded, size: 18, color: Color(0xFF58A6FF)),
-              const SizedBox(width: 8),
-              Text(
-                'Messages (${_messages.length})',
-                style: GoogleFonts.inter(fontSize: 14, fontWeight: FontWeight.w600, color: Colors.white70),
-              ),
-            ],
-          ),
-        ),
+        _buildSmsToolbar(),
+        _buildSmsFilterChips(),
+        if (showThread) _buildThreadHeader(_activeConversationAddress!),
         Expanded(
-          child: _messages.isEmpty
-              ? _buildEmptyState(Icons.inbox_rounded, 'No messages received yet')
-              : ListView.builder(
-                  itemCount: _messages.length,
-                  itemBuilder: (context, index) {
-                    final msg = _messages[index];
-                    final date = DateTime.fromMillisecondsSinceEpoch(msg['date'] ?? 0);
-                    final body = msg['body'] ?? '';
-                    final isReceived = msg['type'] == 1;
-                    final devName = msg['device_name'] ?? 'Phone';
-
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
-                      child: Material(
-                        color: const Color(0xFF161B22),
-                        borderRadius: BorderRadius.circular(12),
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(12),
-                          onTap: () => _showMessageDetail(msg),
-                          child: Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(12),
-                              border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
-                            ),
-                            child: Row(
-                              children: [
-                                // Colored accent strip
-                                Container(
-                                  width: 3,
-                                  height: 44,
-                                  decoration: BoxDecoration(
-                                    color: isReceived ? const Color(0xFF58A6FF) : const Color(0xFF7EE787),
-                                    borderRadius: BorderRadius.circular(2),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Row(
-                                        children: [
-                                          Expanded(
-                                            child: Text(
-                                              msg['address'] ?? 'Unknown',
-                                              style: GoogleFonts.inter(
-                                                fontWeight: FontWeight.w600,
-                                                fontSize: 13,
-                                                color: Colors.white,
-                                              ),
-                                            ),
-                                          ),
-                                          _miniChip(devName, const Color(0xFF58A6FF)),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        body,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: GoogleFonts.inter(fontSize: 12, color: Colors.white54, height: 1.4),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(width: 10),
-                                Column(
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    Text(
-                                      '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
-                                      style: GoogleFonts.jetBrainsMono(fontSize: 11, color: Colors.white30),
-                                    ),
-                                    Text(
-                                      '${date.month}/${date.day}',
-                                      style: GoogleFonts.inter(fontSize: 10, color: Colors.white.withValues(alpha: 0.2)),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    );
-                  },
-                ),
+          child: _conversationMode ? _buildConversationsList() : _buildMessageList(filtered),
         ),
       ],
     );
+  }
+
+  List<Map<String, dynamic>> _filteredMessages() {
+    var list = _messages;
+    if (_activeConversationAddress != null) {
+      list = list.where((m) => m['address'] == _activeConversationAddress).toList();
+    }
+    if (_smsSearchQuery.isNotEmpty) {
+      final q = _smsSearchQuery.toLowerCase();
+      list = list.where((m) {
+        final body = (m['body'] ?? '').toString().toLowerCase();
+        final address = (m['address'] ?? '').toString().toLowerCase();
+        return body.contains(q) || address.contains(q);
+      }).toList();
+    }
+    if (_starredOnly) {
+      list = list.where((m) => m['is_starred'] == 1).toList();
+    }
+    if (_smsTypeFilter != 0) {
+      list = list.where((m) => m['type'] == _smsTypeFilter).toList();
+    }
+    return list;
+  }
+
+  Widget _buildSmsToolbar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _smsSearchController,
+                  onChanged: (v) => setState(() => _smsSearchQuery = v.trim()),
+                  style: GoogleFonts.inter(color: Colors.white, fontSize: 13),
+                  decoration: InputDecoration(
+                    hintText: 'جستجو در پیام‌ها...',
+                    prefixIcon: const Icon(Icons.search_rounded, size: 18, color: Color(0xFF58A6FF)),
+                    suffixIcon: _smsSearchQuery.isEmpty
+                        ? null
+                        : IconButton(
+                            icon: const Icon(Icons.close_rounded, size: 16, color: Colors.white38),
+                            onPressed: () {
+                              _smsSearchController.clear();
+                              setState(() => _smsSearchQuery = '');
+                            },
+                          ),
+                    isDense: true,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              PopupMenuButton<String>(
+                icon: const Icon(Icons.ios_share_rounded, color: Color(0xFFD2A8FF), size: 22),
+                tooltip: 'خروجی و پشتیبان‌گیری',
+                onSelected: _handleDataAction,
+                itemBuilder: (context) => [
+                  const PopupMenuItem(
+                    value: 'csv',
+                    child: Row(children: [
+                      Icon(Icons.table_chart_rounded, size: 18, color: Color(0xFF7EE787)),
+                      SizedBox(width: 10),
+                      Text('خروجی CSV'),
+                    ]),
+                  ),
+                  const PopupMenuItem(
+                    value: 'json',
+                    child: Row(children: [
+                      Icon(Icons.backup_rounded, size: 18, color: Color(0xFF58A6FF)),
+                      SizedBox(width: 10),
+                      Text('پشتیبان‌گیری JSON'),
+                    ]),
+                  ),
+                  const PopupMenuItem(
+                    value: 'import',
+                    child: Row(children: [
+                      Icon(Icons.restore_rounded, size: 18, color: Color(0xFFD2A8FF)),
+                      SizedBox(width: 10),
+                      Text('بازیابی از JSON'),
+                    ]),
+                  ),
+                  const PopupMenuItem(
+                    value: 'open',
+                    child: Row(children: [
+                      Icon(Icons.folder_open_rounded, size: 18, color: Color(0xFFF0883E)),
+                      SizedBox(width: 10),
+                      Text('باز کردن پوشه داده‌ها'),
+                    ]),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          _buildStatsBar(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatsBar() {
+    final total = (_stats['total'] as num?)?.toInt() ?? 0;
+    final received = (_stats['received'] as num?)?.toInt() ?? 0;
+    final sent = (_stats['sent'] as num?)?.toInt() ?? 0;
+    final contacts = (_stats['contacts'] as num?)?.toInt() ?? 0;
+    final starred = (_stats['starred'] as num?)?.toInt() ?? 0;
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(children: [
+        _statChip('کل', total, Icons.sms_rounded, const Color(0xFF58A6FF)),
+        _statChip('دریافتی', received, Icons.call_received_rounded, const Color(0xFF7EE787)),
+        _statChip('ارسالی', sent, Icons.call_made_rounded, const Color(0xFFD2A8FF)),
+        _statChip('مخاطب', contacts, Icons.people_rounded, const Color(0xFFF0883E)),
+        _statChip('ستاره', starred, Icons.star_rounded, const Color(0xFFE3B341)),
+      ]),
+    );
+  }
+
+  Widget _statChip(String label, int value, IconData icon, Color color) {
+    return Container(
+      margin: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.2)),
+      ),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Icon(icon, size: 14, color: color),
+        const SizedBox(width: 6),
+        Text('$value', style: GoogleFonts.jetBrainsMono(fontSize: 12, fontWeight: FontWeight.w700, color: color)),
+        const SizedBox(width: 4),
+        Text(label, style: GoogleFonts.inter(fontSize: 10, color: Colors.white54)),
+      ]),
+    );
+  }
+
+  Widget _buildSmsFilterChips() {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      child: Row(children: [
+        _filterChip('همه', _smsTypeFilter == 0, () => setState(() => _smsTypeFilter = 0)),
+        _filterChip('دریافتی', _smsTypeFilter == 1, () => setState(() => _smsTypeFilter = 1)),
+        _filterChip('ارسالی', _smsTypeFilter == 2, () => setState(() => _smsTypeFilter = 2)),
+        _filterChip('ستاره‌دار', _starredOnly, () => setState(() => _starredOnly = !_starredOnly)),
+        _filterChip('گفتگوها', _conversationMode, () => setState(() {
+          _conversationMode = !_conversationMode;
+          _activeConversationAddress = null;
+        })),
+      ]),
+    );
+  }
+
+  Widget _filterChip(String label, bool selected, VoidCallback onTap) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: ChoiceChip(
+        label: Text(label),
+        selected: selected,
+        onSelected: (_) => onTap(),
+        showCheckmark: false,
+        labelStyle: GoogleFonts.inter(fontSize: 12, color: selected ? const Color(0xFF58A6FF) : Colors.white60),
+        backgroundColor: const Color(0xFF21262D),
+        selectedColor: const Color(0xFF1F6FEB).withValues(alpha: 0.25),
+        side: BorderSide(
+          color: selected ? const Color(0xFF58A6FF).withValues(alpha: 0.4) : Colors.white.withValues(alpha: 0.08),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildThreadHeader(String address) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      color: const Color(0xFF161B22),
+      child: Row(children: [
+        IconButton(
+          icon: const Icon(Icons.arrow_back_rounded, color: Color(0xFF58A6FF)),
+          tooltip: 'بازگشت',
+          onPressed: () => setState(() => _activeConversationAddress = null),
+        ),
+        Expanded(
+          child: Text(
+            address,
+            style: GoogleFonts.jetBrainsMono(fontSize: 14, fontWeight: FontWeight.w700, color: Colors.white),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        IconButton(
+          icon: const Icon(Icons.copy_rounded, color: Colors.white54),
+          tooltip: 'کپی شماره',
+          onPressed: () => _copyToClipboard(address, 'Number'),
+        ),
+        IconButton(
+          icon: const Icon(Icons.delete_outline_rounded, color: Color(0xFFFF7B72)),
+          tooltip: 'حذف گفتگو',
+          onPressed: () => _deleteConversation(address),
+        ),
+      ]),
+    );
+  }
+
+  Widget _buildConversationsList() {
+    if (_conversations.isEmpty) {
+      return _buildEmptyState(Icons.forum_rounded, 'No conversations yet');
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.only(bottom: 12),
+      itemCount: _conversations.length,
+      itemBuilder: (context, index) {
+        final c = _conversations[index];
+        final address = (c['address'] ?? 'Unknown').toString();
+        final count = c['count'] ?? 0;
+        final lastDate = DateTime.fromMillisecondsSinceEpoch((c['last_date'] as int?) ?? 0);
+        final lastBody = (c['last_body'] ?? '').toString();
+
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+          child: Material(
+            color: const Color(0xFF161B22),
+            borderRadius: BorderRadius.circular(12),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: () => setState(() {
+                _activeConversationAddress = address;
+                _conversationMode = false;
+              }),
+              child: Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+                ),
+                child: Row(children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      gradient: const LinearGradient(colors: [Color(0xFF1F6FEB), Color(0xFF58A6FF)]),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(Icons.person_rounded, color: Colors.white, size: 20),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(children: [
+                          Expanded(
+                            child: Text(
+                              address,
+                              style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.white),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          Text('$count', style: GoogleFonts.jetBrainsMono(fontSize: 11, color: const Color(0xFF58A6FF))),
+                        ]),
+                        const SizedBox(height: 4),
+                        Text(
+                          lastBody,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(fontSize: 12, color: Colors.white54),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        '${lastDate.hour.toString().padLeft(2, '0')}:${lastDate.minute.toString().padLeft(2, '0')}',
+                        style: GoogleFonts.jetBrainsMono(fontSize: 11, color: Colors.white30),
+                      ),
+                      Text(
+                        '${lastDate.month}/${lastDate.day}',
+                        style: GoogleFonts.inter(fontSize: 10, color: Colors.white.withValues(alpha: 0.2)),
+                      ),
+                    ],
+                  ),
+                ]),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMessageList(List<Map<String, dynamic>> list) {
+    if (list.isEmpty) {
+      return _buildEmptyState(Icons.inbox_rounded, 'No messages found');
+    }
+
+    final children = <Widget>[];
+    DateTime? lastDay;
+    for (final msg in list) {
+      final date = DateTime.fromMillisecondsSinceEpoch(msg['date'] ?? 0);
+      final day = DateTime(date.year, date.month, date.day);
+      if (lastDay == null || day != lastDay) {
+        children.add(_buildDateHeader(day));
+        lastDay = day;
+      }
+      children.add(_buildMessageRow(msg));
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.only(bottom: 12),
+      itemCount: children.length,
+      itemBuilder: (context, index) => children[index],
+    );
+  }
+
+  Widget _buildDateHeader(DateTime day) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final diff = today.difference(day).inDays;
+    final label = diff == 0
+        ? 'امروز'
+        : (diff == 1
+            ? 'دیروز'
+            : '${day.year}/${day.month.toString().padLeft(2, '0')}/${day.day.toString().padLeft(2, '0')}');
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+      child: Row(children: [
+        const Icon(Icons.calendar_today_rounded, size: 13, color: Colors.white38),
+        const SizedBox(width: 8),
+        Text(label, style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.w600, color: Colors.white54)),
+      ]),
+    );
+  }
+
+  Widget _buildMessageRow(Map<String, dynamic> msg) {
+    final date = DateTime.fromMillisecondsSinceEpoch(msg['date'] ?? 0);
+    final body = (msg['body'] ?? '').toString();
+    final address = (msg['address'] ?? 'Unknown').toString();
+    final isReceived = msg['type'] == 1;
+    final devName = (msg['device_name'] ?? 'Phone').toString();
+    final starred = msg['is_starred'] == 1;
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 3),
+      child: Material(
+        color: const Color(0xFF161B22),
+        borderRadius: BorderRadius.circular(12),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(12),
+          onTap: () => _showMessageDetail(msg),
+          onLongPress: () => _copyToClipboard(body, 'Message'),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: Colors.white.withValues(alpha: 0.04)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 3,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: isReceived ? const Color(0xFF58A6FF) : const Color(0xFF7EE787),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          if (starred) ...[
+                            const Icon(Icons.star_rounded, size: 14, color: Color(0xFFE3B341)),
+                            const SizedBox(width: 4),
+                          ],
+                          Expanded(
+                            child: Text(
+                              address,
+                              style: GoogleFonts.inter(fontWeight: FontWeight.w600, fontSize: 13, color: Colors.white),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          _miniChip(devName, const Color(0xFF58A6FF)),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        body,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: GoogleFonts.inter(fontSize: 12, color: Colors.white54, height: 1.4),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(
+                      '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}',
+                      style: GoogleFonts.jetBrainsMono(fontSize: 11, color: Colors.white30),
+                    ),
+                    Text(
+                      '${date.month}/${date.day}',
+                      style: GoogleFonts.inter(fontSize: 10, color: Colors.white.withValues(alpha: 0.2)),
+                    ),
+                  ],
+                ),
+                PopupMenuButton<String>(
+                  icon: Icon(Icons.more_vert_rounded, color: Colors.white.withValues(alpha: 0.4), size: 20),
+                  onSelected: (a) => _handleMessageAction(a, msg),
+                  itemBuilder: (context) => [
+                    PopupMenuItem(
+                      value: 'star',
+                      child: Row(children: [
+                        Icon(starred ? Icons.star_border_rounded : Icons.star_rounded, size: 18, color: const Color(0xFFE3B341)),
+                        const SizedBox(width: 10),
+                        Text(starred ? 'حذف ستاره' : 'ستاره‌دار'),
+                      ]),
+                    ),
+                    const PopupMenuItem(
+                      value: 'copy',
+                      child: Row(children: [
+                        Icon(Icons.copy_rounded, size: 18, color: Color(0xFF58A6FF)),
+                        SizedBox(width: 10),
+                        Text('کپی متن'),
+                      ]),
+                    ),
+                    const PopupMenuItem(
+                      value: 'copyNumber',
+                      child: Row(children: [
+                        Icon(Icons.phone_rounded, size: 18, color: Color(0xFF7EE787)),
+                        SizedBox(width: 10),
+                        Text('کپی شماره'),
+                      ]),
+                    ),
+                    const PopupMenuItem(
+                      value: 'delete',
+                      child: Row(children: [
+                        Icon(Icons.delete_outline_rounded, size: 18, color: Color(0xFFFF7B72)),
+                        SizedBox(width: 10),
+                        Text('حذف'),
+                      ]),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _handleMessageAction(String action, Map<String, dynamic> msg) async {
+    final id = msg['id']?.toString() ?? '';
+    final address = (msg['address'] ?? '').toString();
+    final body = (msg['body'] ?? '').toString();
+
+    switch (action) {
+      case 'star':
+        await widget.service.db.toggleSmsStarred(id);
+        await _refreshData();
+        break;
+      case 'copy':
+        _copyToClipboard(body, 'Message');
+        break;
+      case 'copyNumber':
+        _copyToClipboard(address, 'Number');
+        break;
+      case 'delete':
+        await _deleteMessage(id);
+        break;
+    }
+  }
+
+  Future<void> _deleteMessage(String id) async {
+    final ok = await _confirm('حذف پیام', 'این پیام برای همیشه حذف شود؟');
+    if (ok == true) {
+      await widget.service.db.deleteSms(id);
+      await _refreshData();
+    }
+  }
+
+  Future<void> _deleteConversation(String address) async {
+    final ok = await _confirm('حذف گفتگو', 'تمام پیام‌های $address حذف شوند؟');
+    if (ok == true) {
+      await widget.service.db.deleteSmsByAddress(address, deviceId: _selectedDeviceId);
+      if (mounted) setState(() => _activeConversationAddress = null);
+      await _refreshData();
+    }
+  }
+
+  Future<bool?> _confirm(String title, String message) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('انصراف')),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFDA3633)),
+            child: const Text('حذف'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSnack(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message, style: GoogleFonts.inter(fontSize: 13))),
+    );
+  }
+
+  Future<void> _handleDataAction(String action) async {
+    try {
+      switch (action) {
+        case 'csv':
+          final csv = await widget.service.backupService.exportCsv();
+          if (mounted) _showSnack('خروجی CSV ساخته شد: ${csv.path}');
+          break;
+        case 'json':
+          final jsonFile = await widget.service.backupService.exportJson();
+          if (mounted) _showSnack('پشتیبان JSON ساخته شد: ${jsonFile.path}');
+          break;
+        case 'import':
+          await _importJson();
+          break;
+        case 'open':
+          await _openDownloadsFolder();
+          break;
+      }
+    } catch (e) {
+      if (mounted) _showSnack('خطا: $e');
+    }
+  }
+
+  Future<void> _importJson() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['json'],
+    );
+    final path = result?.files.single.path;
+    if (path == null) return;
+
+    try {
+      final count = await widget.service.backupService.importJson(File(path));
+      await _refreshData();
+      if (mounted) _showSnack('بازیابی انجام شد ($count پیام)');
+    } catch (e) {
+      if (mounted) _showSnack('خطا در بازیابی: $e');
+    }
   }
 
   // ──────────────────────────────────────────
@@ -1064,10 +1728,14 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                     ElevatedButton.icon(
                       icon: const Icon(Icons.send_rounded, size: 18),
                       label: const Text('Send'),
-                      onPressed: () {
-                        if (_textSendController.text.isNotEmpty) {
-                          widget.service.sendRawText(_textSendController.text);
+                      onPressed: () async {
+                        final text = _textSendController.text.trim();
+                        if (text.isEmpty) return;
+                        try {
+                          await widget.service.sendRawText(text);
                           _textSendController.clear();
+                        } catch (e) {
+                          if (mounted) _showSnack('خطا در ارسال متن: $e');
                         }
                       },
                     ),
@@ -1389,6 +2057,15 @@ class _ServerHomeScreenState extends State<ServerHomeScreen> with TickerProvider
                   ),
                 ],
               ),
+            ),
+          if (pin != null)
+            IconButton(
+              icon: const Icon(Icons.casino_rounded, color: Color(0xFFF0883E)),
+              tooltip: 'تغییر PIN',
+              onPressed: () async {
+                await widget.service.regeneratePin();
+                if (mounted) setState(() {});
+              },
             ),
           if (pin != null)
             IconButton(

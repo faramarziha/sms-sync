@@ -23,6 +23,15 @@ class PairingService {
     return _currentPin!;
   }
 
+  /// Restore a previously generated PIN (used for persistent pairing across
+  /// server restarts).
+  void setPin(String pin) {
+    if (pin.length != 4 || int.tryParse(pin) == null) return;
+    _currentPin = pin;
+    _failedAttempts = 0;
+    _lockoutUntil = null;
+  }
+
   bool verifyPin(String pin) {
     if (_lockoutUntil != null && DateTime.now().isBefore(_lockoutUntil!)) {
       return false;

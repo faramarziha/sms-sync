@@ -47,14 +47,20 @@ class SyncForegroundService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
-        // Ensure the foreground service persists even if the app UI is swiped from Recents
-        val restartServiceIntent = Intent(applicationContext, SyncForegroundService::class.java).also {
-            it.setPackage(packageName)
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(restartServiceIntent)
-        } else {
-            startService(restartServiceIntent)
+        // Ensure the foreground service persists even if the app UI is swiped from Recents.
+        // On Android 12+ starting an FGS from the background can throw
+        // ForegroundServiceStartNotAllowedException, so guard against it.
+        try {
+            val restartServiceIntent = Intent(applicationContext, SyncForegroundService::class.java).also {
+                it.setPackage(packageName)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(restartServiceIntent)
+            } else {
+                startService(restartServiceIntent)
+            }
+        } catch (_: Exception) {
+            // Ignore: the OS may not allow restarting from the background.
         }
         super.onTaskRemoved(rootIntent)
     }

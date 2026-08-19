@@ -9,6 +9,7 @@ import '../transport/nsd_service.dart';
 import '../core/pairing_service.dart';
 import '../core/clipboard_service.dart';
 import 'db/database_service.dart';
+import 'services/backup_service.dart';
 import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
@@ -32,6 +33,7 @@ class ServerSyncService {
   final DiscoveryService discovery;
   final PairingService pairing = PairingService();
   final DatabaseService db = DatabaseService();
+  late final BackupService backupService = BackupService(db);
   final FileTransferService fileTransfer = FileTransferService();
   final ClipboardService clipboardService = ClipboardService();
 
@@ -44,6 +46,7 @@ class ServerSyncService {
 
   static const String _otpPrefKey = 'server_otp_enabled';
   static const String _clipPrefKey = 'server_clipboard_enabled';
+  static const String _pinPrefKey = 'server_pairing_pin';
 
   /// Stream to notify Desktop UI when an OTP code is received
   final _otpNotificationController = StreamController<Map<String, String>>.broadcast();
@@ -60,6 +63,11 @@ class ServerSyncService {
 
   SyncScope _clientScope = SyncScope.both;
   SyncScope get clientScope => _clientScope;
+
+  bool _deviceAllows(String deviceId, SyncScope requestedScope) {
+    final deviceScope = _connectedDevices[deviceId]?.scope ?? _clientScope;
+    return deviceScope == SyncScope.both || deviceScope == requestedScope;
+  }
 
   final _stateController = StreamController<ServerState>.broadcast();
   Stream<ServerState> get stateStream => _stateController.stream;
@@ -78,6 +86,40 @@ class ServerSyncService {
       isClipboardSyncEnabled = prefs.getBool(_clipPrefKey) ?? true;
       _dataUpdatedController.add(null);
     } catch (_) {}
+  }
+
+  Future<String?> _loadSavedPin() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      return prefs.getString(_pinPrefKey);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _savePin(String pin) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_pinPrefKey, pin);
+    } catch (_) {}
+  }
+
+  /// Ensure a pairing PIN exists, reusing the persisted PIN when available so
+  /// a personal single-device setup doesn't have to re-pair every launch.
+  Future<void> _ensurePin() async {
+    final savedPin = await _loadSavedPin();
+    if (savedPin != null && savedPin.length == 4 && int.tryParse(savedPin) != null) {
+      pairing.setPin(savedPin);
+    } else {
+      await _savePin(pairing.generatePin());
+    }
+    _dataUpdatedController.add(null);
+  }
+
+  /// Generate a brand-new pairing PIN and persist it (used by the UI's reset action).
+  Future<void> regeneratePin() async {
+    await _savePin(pairing.generatePin());
+    _dataUpdatedController.add(null);
   }
 
   Future<void> setOtpExtractionEnabled(bool enabled) async {
@@ -120,7 +162,7 @@ class ServerSyncService {
           pairing.reset();
           if (_state != ServerState.idle) {
             _updateState(ServerState.advertising);
-            pairing.generatePin();
+            unawaited(_ensurePin());
           }
         }
       }
@@ -141,9 +183,9 @@ class ServerSyncService {
     } else {
       await discovery.startBrowsing();
     }
-    _fetchLocalIp();
+    await _fetchLocalIp();
     _updateState(ServerState.advertising);
-    pairing.generatePin();
+    await _ensurePin();
     _startClipboardSync();
   }
 
@@ -198,7 +240,8 @@ class ServerSyncService {
           } catch (_) {}
         }
 
-        if (pairing.verifyPin(pin)) {
+        final pinValue = pin?.toString() ?? '';
+        if (pairing.verifyPin(pinValue)) {
           _pairedDeviceIds.add(devId);
           _connectedDevices[devId] = ConnectedDeviceInfo(
             deviceId: devId,
@@ -220,7 +263,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.contactInfo:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.smsSim)) {
           await db.insertOrUpdateSim(message.payload);
           _dataUpdatedController.add(null);
         } else {
@@ -229,7 +272,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.sms:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.smsSim)) {
           await db.insertOrUpdateSms(message.payload);
           _dataUpdatedController.add(null);
         } else {
@@ -238,7 +281,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.rawText:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.textFiles)) {
           await db.insertRawText(message.payload);
           _dataUpdatedController.add(null);
         } else {
@@ -247,7 +290,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.fileHeader:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.textFiles)) {
           await fileTransfer.handleFileHeader(message.payload);
           _dataUpdatedController.add(null);
         } else {
@@ -256,7 +299,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.fileChunk:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.textFiles)) {
           await fileTransfer.handleFileChunk(message.payload);
           _dataUpdatedController.add(null);
         } else {
@@ -265,7 +308,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.smsBatch:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.smsSim)) {
           final records = (message.payload['records'] as List<dynamic>?) ?? [];
           final smsList = records.map((r) => Map<String, dynamic>.from(r as Map)).toList();
           await db.insertSmsBatch(smsList);
@@ -276,7 +319,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.contactInfoBatch:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.smsSim)) {
           final records = (message.payload['records'] as List<dynamic>?) ?? [];
           final sims = records.map((r) => Map<String, dynamic>.from(r as Map)).toList();
           await db.insertSimBatch(sims);
@@ -299,7 +342,7 @@ class ServerSyncService {
         break;
 
       case SyncMessageType.otpCode:
-        if (_pairedDeviceIds.contains(devId)) {
+        if (_pairedDeviceIds.contains(devId) && _deviceAllows(devId, SyncScope.smsSim)) {
           final otp = message.payload['otp'] as String?;
           final sender = message.payload['sender'] as String? ?? 'SMS';
           if (otp != null && otp.isNotEmpty) {
@@ -329,7 +372,13 @@ class ServerSyncService {
 
   /// Send formatted raw text from Desktop to Android Client(s).
   Future<void> sendRawText(String text) async {
+    final hasTextClient = _connectedDevices.values.any(
+      (device) => device.scope == SyncScope.both || device.scope == SyncScope.textFiles,
+    );
     if (text.trim().isEmpty) return;
+    if (!hasTextClient) {
+      throw StateError('No paired client has text and file sync enabled');
+    }
     final payload = {
       'id': DateTime.now().millisecondsSinceEpoch.toString(),
       'text': text,
@@ -348,6 +397,12 @@ class ServerSyncService {
 
   /// Send a file from Desktop to Android Client(s).
   Future<void> sendFile(File file) async {
+    final hasTextClient = _connectedDevices.values.any(
+      (device) => device.scope == SyncScope.both || device.scope == SyncScope.textFiles,
+    );
+    if (!hasTextClient) {
+      throw StateError('No paired client has text and file sync enabled');
+    }
     await fileTransfer.sendFile(
       file: file,
       sender: 'Windows PC',
@@ -357,10 +412,8 @@ class ServerSyncService {
   }
 
   void _cleanUpAllDisconnectedDevices() {
-    final deviceIds = _connectedDevices.keys.toList();
-    if (deviceIds.isNotEmpty) {
-      db.deleteDataForDevices(deviceIds);
-    }
+    // Keep the local history when a phone briefly leaves Wi-Fi. The database
+    // has explicit clear/export actions; disconnecting must not erase history.
     _pairedDeviceIds.clear();
     _connectedDevices.clear();
     _dataUpdatedController.add(null);
@@ -376,7 +429,10 @@ class ServerSyncService {
   void _startClipboardSync() {
     if (!isClipboardSyncEnabled) return;
     clipboardService.startMonitoring((newText) {
-      if (_pairedDeviceIds.isNotEmpty && isClipboardSyncEnabled) {
+      final hasTextClient = _connectedDevices.values.any(
+        (device) => device.scope == SyncScope.both || device.scope == SyncScope.textFiles,
+      );
+      if (hasTextClient && isClipboardSyncEnabled) {
         transport.send(SyncMessage(
           type: SyncMessageType.clipboardSync,
           payload: {

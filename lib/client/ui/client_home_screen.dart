@@ -1,11 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:permission_handler/permission_handler.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../core/file_launcher.dart';
 import '../../core/models/sync_message.dart';
@@ -108,13 +106,14 @@ class _QrScannerSheet extends StatefulWidget {
   State<_QrScannerSheet> createState() => _QrScannerSheetState();
 }
 
-class _QrScannerSheetState extends State<_QrScannerSheet> {
+class _QrScannerSheetState extends State<_QrScannerSheet> with WidgetsBindingObserver {
   MobileScannerController? _controller;
   bool _handled = false;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _controller = MobileScannerController(
       formats: const [BarcodeFormat.qrCode],
       detectionSpeed: DetectionSpeed.noDuplicates,
@@ -122,7 +121,27 @@ class _QrScannerSheetState extends State<_QrScannerSheet> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final controller = _controller;
+    if (controller == null || !controller.value.hasCameraPermission) return;
+
+    switch (state) {
+      case AppLifecycleState.resumed:
+        unawaited(controller.start());
+        break;
+      case AppLifecycleState.inactive:
+        unawaited(controller.stop());
+        break;
+      case AppLifecycleState.detached:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+        break;
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _controller?.dispose();
     super.dispose();
   }
@@ -176,7 +195,7 @@ class _QrScannerSheetState extends State<_QrScannerSheet> {
               child: MobileScanner(
                 controller: _controller!,
                 onDetect: _onDetect,
-                errorBuilder: (_, __, ___) {
+                errorBuilder: (_, _, _) {
                   return Container(
                     color: const Color(0xFF0D1117),
                     alignment: Alignment.center,
@@ -572,35 +591,16 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
     );
   }
 
-  Future<void> _showQrScannerDialog() async {
-    // Request camera permission explicitly so a denial shows a clear message
-    // instead of a silent black camera preview.
-    if (Platform.isAndroid || Platform.isIOS) {
-      var status = await Permission.camera.status;
-      if (status.isDenied || status.isRestricted) {
-        status = await Permission.camera.request();
-      }
-      if (!status.isGranted) {
-        if (mounted) {
-          final permanentlyDenied = status.isPermanentlyDenied;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                permanentlyDenied
-                    ? 'دسترسی دوربین غیرفعال است. لطفاً آن را از تنظیمات فعال کنید.'
-                    : 'برای اسکن کد QR به دسترسی دوربین نیاز است.',
-              ),
-              action: permanentlyDenied
-                  ? SnackBarAction(
-                      label: 'تنظیمات',
-                      onPressed: () => openAppSettings(),
-                    )
-                  : null,
-            ),
-          );
-        }
-        return;
-      }
+  void _showQrScannerDialog() {
+    // mobile_scanner requests the camera permission when its controller starts
+    // and reports denied/unavailable cameras through its errorBuilder. Keeping
+    // that flow here avoids bringing a Windows-only permission plugin into the
+    // desktop build.
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('اسکن QR فقط روی دستگاه اندروید یا iOS در دسترس است.')),
+      );
+      return;
     }
 
     if (!mounted) return;
@@ -1102,7 +1102,7 @@ class _ClientHomeScreenState extends State<ClientHomeScreen> with TickerProvider
                 ),
               ]),
             );
-          }).toList(),
+          }),
         ],
       ),
     );

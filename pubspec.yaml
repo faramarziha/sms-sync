@@ -54,6 +54,10 @@ dependencies:
   qr_flutter: ^4.1.0
   mobile_scanner: ^6.0.4
 
+dependency_overrides:
+  # 0.2.2 can be unpacked without its public Windows header on some setups.
+  permission_handler_windows: 0.2.1
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
